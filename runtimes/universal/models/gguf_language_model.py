@@ -1029,6 +1029,101 @@ class GGUFLanguageModel(BaseModel):
             logger.error(f"Error extracting chat completion result: {e}", exc_info=True)
             raise ValueError(f"Unexpected result from chat completion: {e}") from e
 
+    async def generate_with_logprobs(
+        self,
+        messages: list[dict],
+        max_tokens: int | None = None,
+        temperature: float = 0.7,
+        top_p: float = 1.0,
+        stop: list[str] | None = None,
+        thinking_budget: int | None = None,
+        tools: list[dict] | None = None,
+        tool_choice: str | dict | None = None,
+        top_logprobs: int | None = None,
+        kv_cache_data: bytes | None = None,
+        kv_cache_tokens: int = 0,
+    ) -> dict:
+        """Generate chat completion and include raw logprobs payload when supported."""
+        if self.llama is None:
+            raise RuntimeError("Model not loaded. Call load() first.")
+
+        max_tokens = max_tokens or 512
+
+        # Keep behavior aligned with generate(): if tools are provided and the model
+        # supports native Jinja2 rendering, use that path (no logprobs in this path yet).
+        if tools:
+            jinja2_prompt = self._render_with_jinja2(messages, tools)
+            if jinja2_prompt is not None:
+                content = await self._generate_from_prompt(
+                    prompt=jinja2_prompt,
+                    max_tokens=max_tokens,
+                    temperature=temperature,
+                    top_p=top_p,
+                    stop=stop,
+                    thinking_budget=thinking_budget,
+                    kv_cache_data=kv_cache_data,
+                    kv_cache_tokens=kv_cache_tokens,
+                )
+                return {"content": content, "logprobs": None}
+
+        prepared_messages = self._prepare_messages_with_tools(
+            messages, tools, tool_choice
+        )
+
+        loop = asyncio.get_running_loop()
+
+        def _generate():
+            try:
+                logits_processor = None
+                if thinking_budget is not None:
+                    from utils.thinking import ThinkingBudgetProcessor
+
+                    logits_processor = ThinkingBudgetProcessor(
+                        self.llama, max_thinking_tokens=thinking_budget
+                    )
+
+                kwargs = {
+                    "messages": prepared_messages,
+                    "max_tokens": max_tokens,
+                    "temperature": temperature,
+                    "top_p": top_p,
+                    "stop": stop or [],
+                    "logits_processor": logits_processor,
+                    "logprobs": True,
+                    "kv_cache_data": kv_cache_data,
+                    "kv_cache_tokens": kv_cache_tokens,
+                }
+                if top_logprobs is not None:
+                    kwargs["top_logprobs"] = top_logprobs
+
+                return self.llama.create_chat_completion(**kwargs)
+            except Exception as e:
+                logger.error(
+                    f"Error during llama-cpp chat completion (logprobs): {e}",
+                    exc_info=True,
+                )
+                raise RuntimeError("Chat completion failed") from e
+
+        if _is_unified_memory_gpu():
+            result = _generate()
+        else:
+            result = await loop.run_in_executor(self._executor, _generate)
+
+        try:
+            choice = result["choices"][0]
+            message = choice["message"]
+            content = message.get("content")
+            if content is None:
+                content = choice.get("text", "")
+        except (KeyError, IndexError, TypeError) as e:
+            logger.error(f"Error extracting chat completion result: {e}", exc_info=True)
+            raise ValueError(f"Unexpected result from chat completion: {e}") from e
+
+        return {
+            "content": content.strip() if isinstance(content, str) else "",
+            "logprobs": choice.get("logprobs") if isinstance(choice, dict) else None,
+        }
+
     async def _stream_from_prompt(
         self,
         prompt: str,
