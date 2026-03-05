@@ -116,7 +116,7 @@ jobs:
         env:
           VERSION: ${{ steps.detect-version.outputs.version }}
           DATE: ${{ steps.release-date.outputs.date }}
-          PROSE_CHANGELOG: ${{ steps.generate-prose.outputs.prose_changelog }}
+          PROSE_CHANGELOG_FILE: ${{ steps.generate-prose.outputs.output_file }}
         run: |
           INDEX_FILE="docs/website/docs/changelog/index.md"
 
@@ -127,8 +127,8 @@ jobs:
           <summary><strong>vREPLACE_VERSION</strong> — REPLACE_DATE</summary>
           TEMPLATE
 
-          # Append prose content safely via echo (no shell interpretation)
-          echo "$PROSE_CHANGELOG" >> /tmp/new-release.md
+          # Append prose content from file to avoid ARG_MAX limits on large releases
+          cat "$PROSE_CHANGELOG_FILE" >> /tmp/new-release.md
 
           cat >> /tmp/new-release.md <<'TEMPLATE'
 
