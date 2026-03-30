@@ -200,6 +200,7 @@ jobs:
     permissions:
       contents: write
     strategy:
+      fail-fast: false
       matrix:
         include:
           - os: linux-x86_64
@@ -240,5 +241,4 @@ jobs:
           tag_name: ${{ github.event.release.tag_name }}
           files: |
             dist/pyapp/llamafarm-${{ matrix.component }}-*
-            dist/pyapp/llamafarm-${{ matrix.component }}-*.sha256
           fail_on_unmatched_files: true
