@@ -18,12 +18,15 @@ Environment Variables:
 - LF_RUNTIME_PORT: Server port (default: 11540)
 - LF_RUNTIME_HOST: Server host (default: 0.0.0.0)
 - HAILO_HEF_DIR: Directory containing .hef model files (default: /models)
+- PRELOAD_MODELS: Comma-separated model IDs to load and pin at startup (default: unset)
+- PRELOAD_N_CTX: Context size for preloaded models (default: auto-detected)
 - FORCE_CPU_VISION: Set to "1" to skip Hailo detection and use CPU (default: unset)
 """
 
 import asyncio
 import functools
 import os
+import re
 import subprocess
 import warnings
 from contextlib import asynccontextmanager, suppress
@@ -205,11 +208,28 @@ async def load_language(
     cache_type_k: str | None = None,
     cache_type_v: str | None = None,
     preferred_quantization: str | None = None,
+    trusted: bool = False,
 ):
-    """Load a causal language model (GGUF or transformers format)."""
-    # Reject model IDs with path traversal sequences
-    if ".." in model_id or model_id.startswith(("/", "\\")) or "\\" in model_id or (len(model_id) > 1 and model_id[1] == ":"):
-        raise ValueError(f"Invalid model_id: {model_id}")
+    """Load a causal language model (GGUF or transformers format).
+
+    Args:
+        trusted: Skip path traversal validation. Only set True for server-side
+                 config (e.g. PRELOAD_MODELS env var), never for HTTP input.
+    """
+    # Reject path traversal and invalid IDs from untrusted input (HTTP requests)
+    if not trusted:
+        if (
+            ".." in model_id
+            or model_id.startswith(("/", "\\"))
+            or "\\" in model_id
+            or (len(model_id) > 1 and model_id[1] == ":")
+        ):
+            raise ValueError(f"Invalid model_id: {model_id}")
+
+        # Allow only HuggingFace-style IDs (org/repo, org/repo:quant, repo,
+        # repo:quant) and bare GGUF filenames. Blocks arbitrary relative paths.
+        if not re.match(r"^[a-zA-Z0-9_.\-]+(/[a-zA-Z0-9_.\-]+)?(:[a-zA-Z0-9_.\-]+)?$", model_id):
+            raise ValueError(f"Invalid model_id format: {model_id}")
 
     quant_key = preferred_quantization or "default"
     cache_key = (
@@ -222,7 +242,7 @@ async def load_language(
             if cache_key not in _models:
                 logger.info(f"Loading causal LM: {model_id}")
                 device = get_device()
-                model_format = detect_model_format(model_id)
+                model_format = detect_model_format(model_id, trusted=trusted)
                 logger.info(f"Detected format: {model_format}")
 
                 model: BaseModel
@@ -369,6 +389,35 @@ async def lifespan(app: FastAPI):
     # Start Zenoh IPC interface (non-blocking — falls back to HTTP-only on failure)
     _zenoh_ipc = ZenohIPC(inference_fn=_zenoh_inference)
     await _zenoh_ipc.start()
+
+    # Preload and pin models if configured
+    preload_csv = os.getenv("PRELOAD_MODELS", "").strip()
+    if preload_csv:
+        preload_n_ctx_str = os.getenv("PRELOAD_N_CTX", "").strip()
+        preload_n_ctx = None
+        if preload_n_ctx_str:
+            try:
+                preload_n_ctx = int(preload_n_ctx_str)
+            except ValueError:
+                logger.warning(
+                    f"Invalid PRELOAD_N_CTX value '{preload_n_ctx_str}', "
+                    f"using auto-detected context size"
+                )
+        for model_id in preload_csv.split(","):
+            model_id = model_id.strip()
+            if not model_id:
+                continue
+            try:
+                await load_language(model_id, n_ctx=preload_n_ctx, trusted=True)
+                # Construct the same cache key load_language() uses
+                cache_key = (
+                    f"language:{model_id}:ctx{preload_n_ctx or 'auto'}:"
+                    f"gpuauto:quantdefault"
+                )
+                _models.pin(cache_key)
+                logger.info(f"Preloaded and pinned model: {model_id} ({cache_key})")
+            except Exception as e:
+                logger.warning(f"Failed to preload model '{model_id}': {e}")
 
     yield
 

@@ -442,8 +442,10 @@ class GGUFLanguageModel(BaseModel):
             logger.info(f"Using cache_type_v: {cache_type_v}")
 
         # Detect or use explicit mmproj path for multimodal models
+        # Skip auto-detection for local file paths — they aren't HF repo IDs
         mmproj_path = self.requested_mmproj_path
-        if mmproj_path is None and self.auto_detect_mmproj:
+        is_local_file = self.model_id.endswith(".gguf") or os.path.isfile(self.model_id)
+        if mmproj_path is None and self.auto_detect_mmproj and not is_local_file:
             try:
                 from llamafarm_common import get_mmproj_file_path
 
@@ -468,23 +470,46 @@ class GGUFLanguageModel(BaseModel):
                     "Install it with: pip install llamafarm-llama"
                 ) from e
 
-            # Verify resolved path stays within the HuggingFace cache directory
-            from huggingface_hub.constants import HF_HUB_CACHE
-
+            # Verify path is in an allowed location:
+            # - HuggingFace cache (downloaded models)
+            # - LlamaFarm data dir (~/.llamafarm/)
+            # - GGUF_MODELS_DIR (custom model directory)
+            # Check both the logical path (abspath, for symlinks in allowed dirs)
+            # and the resolved path (realpath, for actual file location).
+            # Either matching is sufficient — a symlink inside ~/.llamafarm/models/
+            # pointing elsewhere is a valid ops-managed setup.
+            abs_path = os.path.abspath(gguf_path)
             resolved = os.path.realpath(gguf_path)
-            hf_cache_resolved = os.path.realpath(HF_HUB_CACHE)
-            if not resolved.startswith(hf_cache_resolved + os.sep):
+
+            from huggingface_hub.constants import HF_HUB_CACHE
+            from llamafarm_common.safe_home import get_data_dir
+
+            allowed_roots = [
+                os.path.realpath(HF_HUB_CACHE),
+                os.path.realpath(str(get_data_dir())),
+            ]
+            gguf_models_dir = os.environ.get("GGUF_MODELS_DIR")
+            if gguf_models_dir:
+                allowed_roots.append(os.path.realpath(gguf_models_dir))
+
+            def _in_allowed(path: str) -> bool:
+                return any(
+                    path.startswith(root + os.sep) or path == root
+                    for root in allowed_roots
+                )
+
+            if not (_in_allowed(abs_path) or _in_allowed(resolved)):
                 raise ValueError(
-                    f"GGUF path outside HuggingFace cache: {gguf_path}"
+                    f"GGUF path outside allowed directories: {gguf_path}"
                 )
 
             # Verify file exists and is readable before attempting to load
-            if not os.path.exists(resolved):
+            if not os.path.exists(gguf_path):
                 raise FileNotFoundError(f"GGUF file not found: {gguf_path}")
-            if not os.access(resolved, os.R_OK):
+            if not os.access(gguf_path, os.R_OK):
                 raise PermissionError(f"GGUF file not readable: {gguf_path}")
 
-            file_size_mb = os.path.getsize(resolved) / (1024 * 1024)
+            file_size_mb = os.path.getsize(gguf_path) / (1024 * 1024)
             logger.info(f"Loading GGUF file ({file_size_mb:.1f} MB): {gguf_path}")
 
             try:

@@ -1,11 +1,13 @@
 """Model format detection utilities.
 
 Detects whether a HuggingFace model repository contains GGUF or transformers format files.
+Also supports detecting format from local file paths (no network required).
 
 Note: Core GGUF utilities (list_gguf_files, select_gguf_file, get_gguf_file_path, etc.)
 are provided by llamafarm_common.model_utils and re-exported here for backward compatibility.
 
 Performance optimizations:
+- Local file paths are detected immediately without any network or cache access
 - Results are cached to avoid repeated API calls within a session
 - Checks local HuggingFace cache before making network requests
 """
@@ -85,7 +87,9 @@ def _check_local_cache_for_model(model_id: str) -> list[str] | None:
         return None
 
 
-def detect_model_format(model_id: str, token: str | None = None) -> str:
+def detect_model_format(
+    model_id: str, token: str | None = None, trusted: bool = False
+) -> str:
     """
     Detect if a HuggingFace model is GGUF or transformers format.
 
@@ -96,6 +100,8 @@ def detect_model_format(model_id: str, token: str | None = None) -> str:
     Args:
         model_id: HuggingFace model identifier (e.g., "unsloth/Qwen3-0.6B-GGUF" or "unsloth/Qwen3-0.6B-GGUF:Q4_K_M")
         token: Optional HuggingFace authentication token for gated models
+        trusted: Reserved for future use. Kept for API compatibility with
+            callers that pass it through from load_language().
 
     Returns:
         "gguf" if model contains .gguf files, "transformers" otherwise
@@ -111,6 +117,15 @@ def detect_model_format(model_id: str, token: str | None = None) -> str:
         >>> detect_model_format("google/gemma-3-1b-it")
         "transformers"
     """
+    # Detect GGUF format from file extension alone — no filesystem access needed.
+    # This covers both local paths (e.g., /models/foo.gguf) and bare filenames
+    # (e.g., foo.gguf) without probing the filesystem with user-influenced paths.
+    if model_id.endswith(".gguf"):
+        # Looks like a .gguf filename/path but doesn't exist at this exact path.
+        # Still treat as GGUF — get_gguf_file_path() will search model directories.
+        logger.info(f"Detected GGUF format from file extension: {model_id}")
+        return "gguf"
+
     # Parse model ID to remove quantization suffix if present
     base_model_id, _ = parse_model_with_quantization(model_id)
 
