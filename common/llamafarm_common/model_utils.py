@@ -19,6 +19,11 @@ import re
 if "HF_XET_HIGH_PERFORMANCE" not in os.environ:
     os.environ["HF_XET_HIGH_PERFORMANCE"] = "1"
 
+# Import offline_mode BEFORE huggingface_hub so that, when LLAMAFARM_OFFLINE=1,
+# the HF_HUB_OFFLINE env var has already been propagated and huggingface_hub
+# picks it up at import time. offline_mode runs its propagation at module-load.
+from . import offline_mode  # noqa: F401
+
 from huggingface_hub import HfApi, snapshot_download
 from huggingface_hub.constants import HF_HUB_CACHE
 
@@ -48,6 +53,54 @@ def _validate_model_id(model_id: str) -> str:
         raise ValueError(f"Invalid model_id format: {model_id}")
 
     return model_id
+
+
+# Aliases are used to construct filesystem subdirectory names under
+# `$LLAMAFARM_MODEL_DIR/<alias>/`. They come from project config
+# (`runtime.models[].name`) which is not direct HTTP input, but because
+# an alias is turned into a filesystem path we still sanitize it to
+# prevent path traversal — both for defense in depth and to satisfy
+# static analysis tools (CodeQL, cubic, qodo) that rightly flag any
+# unsanitized identifier used in a path expression.
+_ALIAS_PATTERN = re.compile(r"^[a-zA-Z0-9._][a-zA-Z0-9._\-]*$")
+
+
+def validate_alias(alias: str) -> str:
+    """
+    Validate a model alias for safe use as a filesystem subdirectory name.
+
+    Aliases must:
+      - Not be empty
+      - Not contain path separators (``/``, ``\\``)
+      - Not contain ``..``
+      - Not be an absolute path
+      - Start with alphanumeric, period, or underscore
+      - Contain only alphanumerics, periods, underscores, and hyphens
+
+    Args:
+        alias: The model alias from ``runtime.models[].name``.
+
+    Returns:
+        The validated alias string, unchanged.
+
+    Raises:
+        ValueError: If the alias fails validation.
+    """
+    if not isinstance(alias, str) or alias == "":
+        raise ValueError("Invalid alias: must be a non-empty string")
+    # Explicit ".." rejection — the pattern recognized by CodeQL's
+    # py/path-injection as a traversal sanitizer.
+    if ".." in alias:
+        raise ValueError(f"Invalid alias: path traversal not allowed: {alias!r}")
+    if "/" in alias or "\\" in alias:
+        raise ValueError(f"Invalid alias: path separator not allowed: {alias!r}")
+    if os.path.isabs(alias):
+        raise ValueError(f"Invalid alias: absolute path not allowed: {alias!r}")
+    if not _ALIAS_PATTERN.match(alias):
+        raise ValueError(
+            f"Invalid alias: must match {_ALIAS_PATTERN.pattern!r}: {alias!r}"
+        )
+    return alias
 
 
 def _get_cached_gguf_files(model_id: str) -> list[str]:
@@ -362,6 +415,14 @@ def list_gguf_files(model_id: str, token: str | None = None) -> list[str]:
     # Parse model ID to remove quantization suffix if present
     base_model_id, _ = parse_model_with_quantization(model_id)
 
+    # Strict offline mode: never call the HF API.
+    if offline_mode.is_offline():
+        raise FileNotFoundError(
+            f"list_gguf_files({base_model_id!r}) refused in offline mode "
+            f"(LLAMAFARM_OFFLINE=1). The caller should use the local cache or "
+            f"$LLAMAFARM_MODEL_DIR instead."
+        )
+
     try:
         api = HfApi()
         all_files = api.list_repo_files(repo_id=base_model_id, token=token)
@@ -534,6 +595,20 @@ def get_gguf_file_path(
                 )
                 return cached_path
 
+    # Strict offline mode: do not attempt any network calls.
+    if offline_mode.is_offline():
+        cache_dir = os.path.join(
+            HF_HUB_CACHE, f"models--{base_model_id.replace('/', '--')}"
+        )
+        offline_mode.raise_offline_error(
+            alias=base_model_id,
+            tried_paths=[cache_dir],
+            fix_command=(
+                f"run 'lf models pull {base_model_id}' on a host with internet, "
+                f"then sync the files"
+            ),
+        )
+
     # Step 2: List all GGUF files in the repository (requires network)
     try:
         available_gguf_files = list_gguf_files(base_model_id, token)
@@ -586,6 +661,160 @@ def get_gguf_file_path(
     return gguf_path
 
 
+def resolve_gguf_path(
+    model_id: str,
+    alias: str,
+    token: str | None = None,
+    preferred_quantization: str | None = None,
+) -> str:
+    """
+    Resolve a GGUF weights file for a runtime model using the three-tier
+    precedence order:
+
+      1. ``$LLAMAFARM_MODEL_DIR/<alias>/`` via the alias-directory resolver
+      2. HuggingFace cache via the existing ``get_gguf_file_path`` logic
+      3. Network download (only when NOT in strict offline mode)
+
+    When strict offline mode is active (``LLAMAFARM_OFFLINE=1``) and tiers 1
+    and 2 both miss, this function raises ``FileNotFoundError`` with a
+    structured multi-line message naming the alias, the paths that were
+    tried, and the ``lf`` CLI command that would make the missing file
+    available.
+
+    Note: absolute-path-in-model-spec is deliberately NOT a tier here.
+    Users who want to load a hand-placed GGUF file should set
+    ``LLAMAFARM_MODEL_DIR`` to the parent directory and reference the file
+    by alias. This avoids a CodeQL py/path-injection finding on an
+    unsanitized ``os.path.*`` call with a caller-controlled path, and
+    centralizes the "where do my models live" decision on a single
+    well-understood env var.
+
+    Args:
+        model_id: HuggingFace model identifier, optionally with ``:quant``
+            suffix.
+        alias: The model's ``runtime.models[].name`` from llamafarm.yaml.
+            Used as the subdirectory name under ``LLAMAFARM_MODEL_DIR`` and
+            as the user-facing identifier in error messages.
+        token: Optional HuggingFace token for gated models.
+        preferred_quantization: Optional quantization preference. If absent,
+            parsed from ``model_id``'s suffix.
+
+    Returns:
+        Absolute filesystem path to the selected GGUF weights file.
+
+    Raises:
+        ValueError: If `alias` contains path traversal characters or is
+            otherwise unsafe for use as a filesystem subdirectory name.
+        FileNotFoundError: when no matching file can be found in any tier
+            and offline mode (or a network failure) prevents fallback to a
+            network download.
+    """
+    # Validate the alias before any path manipulation. The alias comes from
+    # project config (runtime.models[].name) and gets turned into a
+    # filesystem subdirectory under LLAMAFARM_MODEL_DIR — path traversal
+    # here would allow loading arbitrary .gguf files from the host.
+    validate_alias(alias)
+
+    # Reject absolute paths up front with a clear remediation message. The
+    # old behavior flowed absolute paths into os.path.* which triggered a
+    # CodeQL py/path-injection finding; users who want to reference a
+    # hand-placed GGUF should instead set LLAMAFARM_MODEL_DIR to the
+    # parent directory and reference the file by alias.
+    if os.path.isabs(model_id):
+        raise ValueError(
+            f"Absolute model paths are not supported (got {model_id!r}). "
+            f"Set LLAMAFARM_MODEL_DIR to the parent directory and reference "
+            f"the file by alias (runtime.models[].name) instead."
+        )
+
+    # Tier 1: alias-directory lookup via $LLAMAFARM_MODEL_DIR.
+    # Lazy import to avoid a circular dependency at module-load time.
+    from . import model_dir as _model_dir
+
+    md_result = _model_dir.resolve_from_model_dir(alias)
+    if md_result is not None:
+        logger.info(
+            f"Resolved alias {alias!r} from LLAMAFARM_MODEL_DIR: {md_result.weights_path}"
+        )
+        return md_result.weights_path
+
+    # Tier 2+3: fall through to the existing HF-cache-first logic.
+    # get_gguf_file_path already enforces strict offline mode internally when
+    # the cache is empty and LLAMAFARM_OFFLINE=1 is set. If offline mode is
+    # active and it raises, we catch and re-raise with alias context so the
+    # operator sees the alias name rather than just the repo id.
+    try:
+        return get_gguf_file_path(
+            model_id,
+            token=token,
+            preferred_quantization=preferred_quantization,
+        )
+    except FileNotFoundError as e:
+        # Enrich the error with alias + LLAMAFARM_MODEL_DIR context if we're
+        # in offline mode. Other FileNotFoundError messages pass through.
+        if offline_mode.is_offline():
+            tried: list[str] = []
+            md_root = offline_mode.model_dir()
+            if md_root is not None:
+                tried.append(os.path.join(md_root, alias))
+            base_repo_id, _ = parse_model_with_quantization(model_id)
+            tried.append(
+                os.path.join(
+                    HF_HUB_CACHE,
+                    f"models--{base_repo_id.replace('/', '--')}",
+                )
+            )
+            offline_mode.raise_offline_error(
+                alias=alias,
+                tried_paths=tried,
+                fix_command=(
+                    f"run 'lf models pull {model_id}' on a host with internet, "
+                    f"then sync the files to this host"
+                ),
+                extra=(
+                    "If the build host has internet, you can also use "
+                    "'lf models path --ensure' to pull before emitting a plan."
+                ),
+            )
+        # Not in offline mode — re-raise original.
+        raise
+
+
+def resolve_mmproj_path(
+    model_id: str,
+    alias: str,
+    token: str | None = None,
+) -> str | None:
+    """
+    Resolve a multimodal projector file for a runtime model, applying the
+    same precedence order as ``resolve_gguf_path``. Returns None when no
+    mmproj is available (mmproj is optional, so missing is not an error).
+
+    Tier 1 (absolute path) is not applicable — mmproj is always derived
+    from either the alias directory or the HF cache.
+
+    Raises:
+        ValueError: If `alias` contains path traversal characters.
+    """
+    # Same alias validation as resolve_gguf_path — prevents path traversal
+    # through LLAMAFARM_MODEL_DIR.
+    validate_alias(alias)
+
+    # Tier 2: alias-directory lookup.
+    from . import model_dir as _model_dir
+
+    md_result = _model_dir.resolve_from_model_dir(alias)
+    if md_result is not None and md_result.mmproj_path is not None:
+        logger.info(
+            f"Resolved mmproj for alias {alias!r} from LLAMAFARM_MODEL_DIR: "
+            f"{md_result.mmproj_path}"
+        )
+        return md_result.mmproj_path
+
+    # Tier 3+4: HF cache + network.
+    return get_mmproj_file_path(model_id, token=token)
+
+
 def get_mmproj_file_path(
     model_id: str,
     token: str | None = None,
@@ -626,6 +855,15 @@ def get_mmproj_file_path(
         if cached_path:
             logger.info(f"Using cached mmproj file: {selected}")
             return cached_path
+
+    # Strict offline mode: do not attempt any network calls. mmproj is
+    # optional (a chat model may or may not have one), so silently returning
+    # None is the correct behavior here — callers handle None gracefully.
+    if offline_mode.is_offline():
+        logger.debug(
+            "Offline mode: no cached mmproj for %s; returning None", base_model_id
+        )
+        return None
 
     # Step 2: List all GGUF files in the repository (requires network)
     try:

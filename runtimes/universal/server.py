@@ -22,8 +22,35 @@ Environment Variables:
 import asyncio
 import importlib.util
 import os
+import sys
 import warnings
 from contextlib import asynccontextmanager, suppress
+
+# Force UTF-8 on stdout/stderr before any logger is configured. On Windows
+# the default console codec is cp1252, and llama.cpp's C→Python log callback
+# (in llamafarm_llama/_bindings.py) routes native log output containing
+# byte-level BPE markers like `Ġ` (U+0120) and `Ċ` (U+010A) through Python
+# logging. Without this reconfigure, writing those characters to stdout
+# crashes with `UnicodeEncodeError: 'charmap' codec can't encode character`,
+# breaking model loading on Windows PyApp binaries.
+if sys.platform == "win32":
+    try:
+        sys.stdout.reconfigure(encoding="utf-8", errors="replace")
+        sys.stderr.reconfigure(encoding="utf-8", errors="replace")
+    except (AttributeError, ValueError):
+        # `reconfigure` is Python 3.7+; ValueError is raised if stdout
+        # has been replaced with a non-TextIOWrapper (e.g. pytest capture).
+        # Falling back to the default codec is the correct behavior in
+        # both cases — there's no safer action we can take here.
+        pass
+
+# Import the offline_mode bootstrap BEFORE any module that transitively
+# imports huggingface_hub or transformers. The llamafarm_common package's
+# __init__ imports offline_mode first, which reads LLAMAFARM_OFFLINE and
+# sets HF_HUB_OFFLINE / TRANSFORMERS_OFFLINE accordingly. If this import
+# happened later, the offline env vars would be read by huggingface_hub
+# before we had a chance to set them.
+from llamafarm_common import offline_mode as _offline_mode_bootstrap  # noqa: F401
 
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
@@ -294,6 +321,10 @@ async def lifespan(app: FastAPI):
 
     # Startup
     logger.info("Starting Universal Runtime")
+
+    # Emit the single-line offline-mode status so operators can verify
+    # LLAMAFARM_OFFLINE / LLAMAFARM_MODEL_DIR are being honored.
+    _offline_mode_bootstrap.log_startup_mode()
 
     # Log addon availability
     if _HAS_TIMESERIES:
