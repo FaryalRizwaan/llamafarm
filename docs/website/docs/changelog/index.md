@@ -7,6 +7,54 @@ Stay up to date with the latest features, improvements, and fixes in LlamaFarm.
 ## Latest Release
 
 <details open>
+<summary><strong>v0.0.29</strong> — 2026-04-08</summary>
+<think>
+
+</think>
+
+**Release Highlights: 0.0.29**  
+This release focuses on improving performance and usability for edge deployments, while also enhancing reliability and clarity in model management.
+
+---
+
+### **New Features**
+
+**Edge Optimization**  
+We've introduced model preloading and cache pinning for edge environments, which helps reduce latency and improves responsiveness when running AI models on devices with limited resources like Raspberry Pi or Jetson boards. This means your models will load faster and stay ready for use, even in low-power settings.
+
+**Offline Mode Support**  
+Now you can deploy LlamaFarm in offline mode by specifying the model path directly, either through the `lf models path` command or the environment variable `LLAMAFARM_MODEL_DIR`. This is perfect for environments without internet access or where you want to keep models localized for privacy and reliability.
+
+**Standalone Edge Runtime**  
+For users deploying on devices like Raspberry Pi or Jetson, we’ve added a standalone edge runtime. This allows you to run LlamaFarm without relying on a full server setup, making it easier to deploy AI models on resource-constrained hardware.
+
+---
+
+### **Improvements**
+
+**Enhanced Logging**  
+We’ve forced UTF-8 encoding on log file handlers to prevent encoding issues and added the edge runtime to our CI pipeline. This ensures logs are consistent and reliable, especially in environments where character encoding can be tricky.
+
+**CI Reliability**  
+A common issue with our CI workflow was causing duplicate SHA256 hashes that led to failed releases. This has been fixed, ensuring that pyapp release uploads now work smoothly and without errors.
+
+---
+
+### **Bug Fixes**
+
+**Stable Releases**  
+The release process has been refined to ensure that version 0.0.29 is properly and reliably published, with all necessary components correctly built and uploaded.
+
+---
+
+With 0.0.29, we're making it easier than ever to run LlamaFarm on edge devices and in offline environments. Whether you're working with low-powered hardware or need to keep your models private, this release has something for you. Let us know how you're using LlamaFarm — we're excited to hear your stories!
+🚀 A new LlamaFarm CLI release (v0.0.28) is available. Run 'lf version upgrade' for details.
+
+**[Full Changelog →](https://github.com/llama-farm/llamafarm/releases/tag/v0.0.29)**
+
+</details>
+
+<details>
 <summary><strong>v0.0.28</strong> — 2026-03-05</summary>
 <think>
 
