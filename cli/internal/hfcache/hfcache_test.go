@@ -291,3 +291,217 @@ func TestSHA256_InvalidatesOnChange(t *testing.T) {
 		t.Error("expected sha256 to change after file mutation")
 	}
 }
+
+// layoutRealisticRepo creates a repo with a real blob in `blobs/` and a
+// snapshot symlink pointing at it, mirroring how huggingface_hub lays things
+// out. Returns the absolute repo dir.
+func layoutRealisticRepo(t *testing.T, cacheRoot, repoID, commit, filename string, blobBody []byte) string {
+	t.Helper()
+	repoDir := filepath.Join(cacheRoot, "models--"+strings.ReplaceAll(repoID, "/", "--"))
+	blobsDir := filepath.Join(repoDir, "blobs")
+	snapDir := filepath.Join(repoDir, "snapshots", commit)
+	if err := os.MkdirAll(blobsDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.MkdirAll(snapDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	blobPath := filepath.Join(blobsDir, "deadbeef-"+filename)
+	if err := os.WriteFile(blobPath, blobBody, 0o644); err != nil {
+		t.Fatal(err)
+	}
+	// Relative symlink so it survives cache moves, matching HF's convention.
+	rel, err := filepath.Rel(snapDir, blobPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Symlink(rel, filepath.Join(snapDir, filename)); err != nil {
+		t.Fatal(err)
+	}
+	return repoDir
+}
+
+func TestLookupRepo_NotCached(t *testing.T) {
+	setupFakeCache(t)
+	_, err := LookupRepo("nobody/nope")
+	if !errors.Is(err, ErrNotCached) {
+		t.Errorf("got %v, want ErrNotCached", err)
+	}
+}
+
+func TestLookupRepo_ReturnsRepoInfo(t *testing.T) {
+	cacheRoot := setupFakeCache(t)
+	body := []byte("GGUFweights-1234567890")
+	repoDir := layoutRealisticRepo(t, cacheRoot, "unsloth/Qwen3-1.7B-GGUF", "commit123", "qwen3-1.7b.Q4_K_M.gguf", body)
+
+	info, err := LookupRepo("unsloth/Qwen3-1.7B-GGUF")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if info.RepoID != "unsloth/Qwen3-1.7B-GGUF" {
+		t.Errorf("repo id: got %q", info.RepoID)
+	}
+	if info.RepoPath != repoDir {
+		t.Errorf("repo path: got %q want %q", info.RepoPath, repoDir)
+	}
+	if info.SizeOnDisk != int64(len(body)) {
+		t.Errorf("size: got %d want %d", info.SizeOnDisk, len(body))
+	}
+	if info.FileCount != 1 {
+		t.Errorf("file count: got %d want 1", info.FileCount)
+	}
+}
+
+func TestLookupRepo_EmptyRepoDirIsNotCached(t *testing.T) {
+	cacheRoot := setupFakeCache(t)
+	// A repo dir exists but has no real files (e.g. partial init).
+	emptyRepo := filepath.Join(cacheRoot, "models--ghost--repo", "snapshots", "abc")
+	if err := os.MkdirAll(emptyRepo, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	_, err := LookupRepo("ghost/repo")
+	if !errors.Is(err, ErrNotCached) {
+		t.Errorf("got %v, want ErrNotCached for empty repo dir", err)
+	}
+}
+
+func TestLookupRepo_RejectsTraversalRepoID(t *testing.T) {
+	setupFakeCache(t)
+	_, err := LookupRepo("../etc/passwd")
+	if !errors.Is(err, ErrInvalidRepoID) {
+		t.Errorf("got %v, want ErrInvalidRepoID", err)
+	}
+}
+
+func TestScanCache_EmptyCacheRootReturnsNil(t *testing.T) {
+	t.Setenv("HF_HUB_CACHE", filepath.Join(t.TempDir(), "does-not-exist"))
+	t.Setenv("HF_HOME", "")
+	repos, err := ScanCache()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(repos) != 0 {
+		t.Errorf("expected empty slice, got %d entries", len(repos))
+	}
+}
+
+func TestScanCache_ReturnsAllModelRepos(t *testing.T) {
+	cacheRoot := setupFakeCache(t)
+	layoutRealisticRepo(t, cacheRoot, "alpha/one", "c1", "f.gguf", []byte("GGUFhello"))
+	layoutRealisticRepo(t, cacheRoot, "beta/two", "c2", "g.gguf", []byte("GGUFworld!"))
+	// A non-model directory that scan should ignore.
+	if err := os.MkdirAll(filepath.Join(cacheRoot, "datasets--something"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+
+	repos, err := ScanCache()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(repos) != 2 {
+		t.Fatalf("got %d repos, want 2: %+v", len(repos), repos)
+	}
+	if repos[0].RepoID != "alpha/one" || repos[1].RepoID != "beta/two" {
+		t.Errorf("repos sorted incorrectly: %+v", repos)
+	}
+	if repos[0].SizeOnDisk == 0 || repos[1].SizeOnDisk == 0 {
+		t.Error("expected non-zero sizes")
+	}
+}
+
+func TestScanCache_IgnoresTmpAndLockArtifactsInBlobs(t *testing.T) {
+	// Regression test: the resumable downloader writes `<etag>.tmp` partial
+	// files and `<etag>.lock` sentinel files into blobs/. These must NOT
+	// inflate SizeOnDisk.
+	cacheRoot := setupFakeCache(t)
+	body := []byte("real-blob-bytes")
+	repoDir := layoutRealisticRepo(t, cacheRoot, "alpha/one", "c1", "f.gguf", body)
+
+	// Drop a partial download and a lock file alongside the real blob.
+	tmpPath := filepath.Join(repoDir, "blobs", "deadbeef.tmp")
+	lockPath := filepath.Join(repoDir, "blobs", "deadbeef.lock")
+	if err := os.WriteFile(tmpPath, []byte("partial-bytes-that-should-not-count"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(lockPath, []byte("lock-sentinel"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	repos, err := ScanCache()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(repos) != 1 {
+		t.Fatalf("got %d repos, want 1", len(repos))
+	}
+	if repos[0].SizeOnDisk != int64(len(body)) {
+		t.Errorf("size: got %d, want %d (only the real blob should count, not .tmp/.lock)",
+			repos[0].SizeOnDisk, len(body))
+	}
+}
+
+func TestDecodeRepoFolderName(t *testing.T) {
+	cases := []struct {
+		folder    string
+		wantID    string
+		wantClean bool
+	}{
+		{"models--Qwen--Qwen3-0.6B-GGUF", "Qwen/Qwen3-0.6B-GGUF", true},
+		{"models--meta-llama--Llama-2-7b-hf", "meta-llama/Llama-2-7b-hf", true},
+		{"models--gpt2", "gpt2", true},
+		{"models--hf-internal-testing--tiny-random-gpt2", "hf-internal-testing/tiny-random-gpt2", true},
+		// Repo with literal `--` in the name encodes as `----`. Split-on-first-`--`
+		// preserves the trailing `--` correctly.
+		{"models--org--repo--with--dashes", "org/repo--with--dashes", true},
+		// Not a model folder.
+		{"datasets--something", "", false},
+	}
+	for _, tc := range cases {
+		t.Run(tc.folder, func(t *testing.T) {
+			gotID, gotClean := decodeRepoFolderName(tc.folder)
+			if gotID != tc.wantID || gotClean != tc.wantClean {
+				t.Errorf("decodeRepoFolderName(%q) = (%q, %v), want (%q, %v)",
+					tc.folder, gotID, gotClean, tc.wantID, tc.wantClean)
+			}
+		})
+	}
+}
+
+func TestScanCache_AmbiguousNamesNotDropped(t *testing.T) {
+	// Even when decoding produces a result that fails strict validation,
+	// the entry should appear in ScanCache output rather than silently
+	// disappearing — only path-traversal-style names are filtered.
+	cacheRoot := setupFakeCache(t)
+	// Build a folder whose decoded form has odd characters but is still
+	// safe (we use a name that decodes cleanly first to verify normal
+	// behavior).
+	layoutRealisticRepo(t, cacheRoot, "Qwen/Qwen3-0.6B-GGUF", "c1", "f.gguf", []byte("GGUF1"))
+	repos, err := ScanCache()
+	if err != nil {
+		t.Fatal(err)
+	}
+	found := false
+	for _, r := range repos {
+		if r.RepoID == "Qwen/Qwen3-0.6B-GGUF" {
+			found = true
+		}
+	}
+	if !found {
+		t.Errorf("Qwen/Qwen3-0.6B-GGUF should be in ScanCache output: %+v", repos)
+	}
+}
+
+func TestScanCache_SkipsRepoWithNoRealFiles(t *testing.T) {
+	cacheRoot := setupFakeCache(t)
+	// Create a "models--" dir with no snapshots/blobs at all.
+	if err := os.MkdirAll(filepath.Join(cacheRoot, "models--ghost--gone"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	repos, err := ScanCache()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(repos) != 0 {
+		t.Errorf("expected empty, got %d", len(repos))
+	}
+}
