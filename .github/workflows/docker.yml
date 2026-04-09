@@ -65,6 +65,10 @@ jobs:
         with:
           ref: ${{ env.BUILD_REF }}
 
+      - name: Resolve checked-out SHA
+        id: resolve
+        run: echo "sha=$(git rev-parse --short HEAD)" >> "$GITHUB_OUTPUT"
+
       - name: Free disk space for large images
         if: matrix.service == 'runtime'
         run: |
@@ -104,7 +108,7 @@ jobs:
             type=semver,pattern={{version}},suffix=-amd64
             type=semver,pattern={{major}}.{{minor}},suffix=-amd64
             type=semver,pattern={{major}},suffix=-amd64
-            type=sha,prefix=${{ env.BUILD_REF_NAME }}-,suffix=-amd64
+            type=raw,value=${{ env.BUILD_REF_NAME }}-${{ steps.resolve.outputs.sha }},suffix=-amd64
             type=raw,value=latest-amd64,enable={{is_default_branch}}
           labels: |
             org.opencontainers.image.title=LlamaFarm ${{ matrix.service }}
@@ -180,6 +184,10 @@ jobs:
         with:
           ref: ${{ env.BUILD_REF }}
 
+      - name: Resolve checked-out SHA
+        id: resolve
+        run: echo "sha=$(git rev-parse --short HEAD)" >> "$GITHUB_OUTPUT"
+
       - name: Set up Docker Buildx
         uses: docker/setup-buildx-action@v4
 
@@ -202,7 +210,7 @@ jobs:
             type=semver,pattern={{version}},suffix=-arm64
             type=semver,pattern={{major}}.{{minor}},suffix=-arm64
             type=semver,pattern={{major}},suffix=-arm64
-            type=sha,prefix=${{ env.BUILD_REF_NAME }}-,suffix=-arm64
+            type=raw,value=${{ env.BUILD_REF_NAME }}-${{ steps.resolve.outputs.sha }},suffix=-arm64
             type=raw,value=latest-arm64,enable={{is_default_branch}}
           labels: |
             org.opencontainers.image.title=LlamaFarm ${{ matrix.service }}
@@ -253,6 +261,10 @@ jobs:
         with:
           ref: ${{ env.BUILD_REF }}
 
+      - name: Resolve checked-out SHA
+        id: resolve
+        run: echo "sha=$(git rev-parse --short HEAD)" >> "$GITHUB_OUTPUT"
+
       - name: Set up Docker Buildx
         uses: docker/setup-buildx-action@v4
 
@@ -300,7 +312,7 @@ jobs:
             type=semver,pattern={{version}}
             type=semver,pattern={{major}}.{{minor}}
             type=semver,pattern={{major}}
-            type=sha,prefix=${{ env.BUILD_REF_NAME }}-
+            type=raw,value=${{ env.BUILD_REF_NAME }}-${{ steps.resolve.outputs.sha }}
             type=raw,value=latest,enable={{is_default_branch}}
 
       - name: Create and push multi-arch manifest (branches/tags)
