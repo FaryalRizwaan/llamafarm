@@ -7,7 +7,6 @@ import (
 	"runtime"
 	"strings"
 
-	"github.com/llamafarm/cli/cmd/orchestrator"
 	"github.com/llamafarm/cli/cmd/utils"
 )
 
@@ -104,13 +103,20 @@ func getComponentSitePackagesDir(component string) (string, error) {
 		return "", err
 	}
 
-	// Map component name to working directory using the service graph
-	serviceDef, exists := orchestrator.ServiceGraph[component]
+	// Map component name to source working directory.
+	// In binary mode there is no source tree, so these paths will not exist
+	// and the caller receives an error (which is handled gracefully).
+	componentWorkDirs := map[string]string{
+		"server":            "server",
+		"rag":               "rag",
+		"universal-runtime": "runtimes/universal",
+	}
+	workDir, exists := componentWorkDirs[component]
 	if !exists {
 		return "", fmt.Errorf("unknown component: %s", component)
 	}
 
-	venvBase := filepath.Join(lfDir, "src", serviceDef.WorkDir, ".venv")
+	venvBase := filepath.Join(lfDir, "src", workDir, ".venv")
 
 	if runtime.GOOS == "windows" {
 		dir := filepath.Join(venvBase, "Lib", "site-packages")

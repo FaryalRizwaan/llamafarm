@@ -35,7 +35,6 @@ WorkingDirectory={{ .WorkingDirectory }}
 {{- if .UserGroup }}
 {{ .UserGroup }}
 {{- end }}
-Environment="LF_DEPLOY_MODE=binary"
 Environment="LF_DATA_DIR={{ .DataDir }}"
 Environment="HF_HUB_DISABLE_PROGRESS_BARS=1"
 {{- if .ExtraEnv }}

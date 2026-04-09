@@ -18,6 +18,11 @@ import (
 	"github.com/llamafarm/cli/internal/buildinfo"
 )
 
+const (
+	githubOwner = "llama-farm"
+	githubRepo  = "llamafarm"
+)
+
 // BinaryManager handles downloading and managing PyApp component binaries
 type BinaryManager struct {
 	version string

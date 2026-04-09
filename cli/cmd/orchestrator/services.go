@@ -8,7 +8,6 @@ import (
 	"net/http"
 	"os"
 	"path/filepath"
-	"runtime"
 	"strings"
 	"sync"
 	"time"
@@ -72,16 +71,9 @@ type ServiceDefinition struct {
 	CanStartLocally bool
 	DefaultTimeout  time.Duration
 
-	// Declarative start configuration
-	WorkDir         string            // Working directory for the process
-	Command         string            // Command to execute (e.g., "uv", "python")
-	Args            []string          // Command arguments
-	Env             map[string]string // Environment variables
-	HealthComponent string            // Component name in /health endpoint (e.g., "server", "rag")
-
-	// Hardware-specific packages (optional)
-	// If set, these packages will be installed with hardware-appropriate wheels after uv sync
-	HardwarePackages []HardwarePackageSpec
+	Env             map[string]string    // Environment variables passed to the binary
+	HealthComponent string               // Component name in /health endpoint (e.g., "server", "rag")
+	HardwarePackages []HardwarePackageSpec // Hardware-specific package metadata (used by bundle)
 
 	// Runtime info
 	State *ServiceState
@@ -126,15 +118,7 @@ var ServiceGraph = map[string]*ServiceDefinition{
 		Name:            "universal-runtime",
 		Dependencies:    []string{"server"},
 		CanStartLocally: true,
-		DefaultTimeout:  180 * time.Second, // Longer timeout for first-time dependency installation
-		WorkDir:         "runtimes/universal",
-		Command:         "uv",
-		Args: func() []string {
-			if runtime.GOOS == "linux" {
-				return []string{"run", "--managed-python", "python", "server.py"}
-			}
-			return []string{"run", "--managed-python", "--no-sync", "python", "server.py"}
-		}(),
+		DefaultTimeout:  180 * time.Second,
 		Env: map[string]string{
 			"LOG_FILE":                     filepath.Join("${LF_DATA_DIR}", "logs", "universal-runtime.log"),
 			"LF_RUNTIME_PORT":              "11540",
@@ -142,32 +126,20 @@ var ServiceGraph = map[string]*ServiceDefinition{
 			"TRANSFORMERS_OUTPUT_DIR":      filepath.Join("${LF_DATA_DIR}", "outputs", "images"),
 			"TRANSFORMERS_CACHE_DIR":       filepath.Join("${HOME}", ".cache", "huggingface"),
 			"HF_HUB_DISABLE_PROGRESS_BARS": hfHubDisableProgressBars,
-			// Device control (empty = inherit from parent environment)
-			"TRANSFORMERS_SKIP_MPS": "", // Set to "1" to skip MPS on macOS
-			// Note: PYTORCH_MPS_HIGH_WATERMARK_RATIO removed - setting it to non-default
-			// values causes "invalid low watermark ratio" errors on some PyTorch versions.
-			// Let PyTorch use its default memory management.
-			"LLAMAFARM_GGUF_FORCE_CPU": "", // Set to "1" to force CPU for GGUF inference (avoids Metal SIGSEGV in CI)
-			"HF_TOKEN":                 "",
-			// In CI environments, use CPU-only PyTorch to avoid downloading 3GB+ of CUDA packages
-			"UV_EXTRA_INDEX_URL": "${UV_EXTRA_INDEX_URL}",
-			"UV_INDEX_STRATEGY":  "${UV_INDEX_STRATEGY}",
+			"TRANSFORMERS_SKIP_MPS":         "", // Set to "1" to skip MPS on macOS
+			"LLAMAFARM_GGUF_FORCE_CPU":      "", // Set to "1" to force CPU for GGUF inference
+			"HF_TOKEN":                      "",
 		},
 		HealthComponent: "universal-runtime",
 		HardwarePackages: []HardwarePackageSpec{
 			PyTorchSpec,
-			// Note: llama.cpp binaries are downloaded separately via InstallLlamaBinary,
-			// not via pip. The llamafarm-llama package is installed as a regular dependency.
 		},
 	},
 	"server": {
 		Name:            "server",
-		Dependencies:    []string{}, // No dependencies
+		Dependencies:    []string{},
 		CanStartLocally: true,
 		DefaultTimeout:  90 * time.Second,
-		WorkDir:         "server",
-		Command:         "uv",
-		Args:            []string{"run", "--managed-python", "uvicorn", "main:app", "--host", "0.0.0.0", "--port", "14345"},
 		Env: map[string]string{
 			"LOG_FILE":                     filepath.Join("${LF_DATA_DIR}", "logs", "server.log"),
 			"OLLAMA_HOST":                  "http://localhost:11434",
@@ -177,12 +149,9 @@ var ServiceGraph = map[string]*ServiceDefinition{
 	},
 	"rag": {
 		Name:            "rag",
-		Dependencies:    []string{"server", "universal-runtime"}, // Depends on both
+		Dependencies:    []string{"server", "universal-runtime"},
 		CanStartLocally: true,
 		DefaultTimeout:  180 * time.Second,
-		WorkDir:         "rag",
-		Command:         "uv",
-		Args:            []string{"run", "--managed-python", "python", "main.py"},
 		Env: map[string]string{
 			"LOG_FILE":                     filepath.Join("${LF_DATA_DIR}", "logs", "rag.log"),
 			"HF_HUB_DISABLE_PROGRESS_BARS": hfHubDisableProgressBars,
@@ -202,16 +171,7 @@ type ServiceManager struct {
 
 // NewServiceManager returns a new ServiceManager.
 func NewServiceManager(serverURL string) (*ServiceManager, error) {
-	var orchestrator *NativeOrchestrator
-	var err error
-
-	if IsBinaryMode() {
-		utils.LogDebug("Binary deploy mode enabled\n")
-		orchestrator, err = NewBinaryOrchestrator(serverURL)
-	} else {
-		orchestrator, err = NewOrchestrator(serverURL)
-	}
-
+	orchestrator, err := NewOrchestrator(serverURL)
 	if err != nil {
 		return nil, fmt.Errorf("failed to create orchestrator: %w", err)
 	}
@@ -391,40 +351,32 @@ func (sm *ServiceManager) ensureSingleService(serviceName string) error {
 	return nil
 }
 
-// startService starts a service using its declarative configuration.
-// In binary mode, it launches pre-built PyApp binaries instead of uv + source.
+// startService starts a service from a pre-built PyApp binary.
 func (sm *ServiceManager) startService(serviceDef *ServiceDefinition) error {
-	if IsBinaryMode() {
-		return sm.startServiceBinary(serviceDef)
+	binaryPath, err := ResolveBinaryPath(serviceDef.Name)
+	if err != nil {
+		return fmt.Errorf("could not resolve binary: %w", err)
 	}
-	return sm.startServiceSource(serviceDef)
-}
 
-// startServiceSource starts a service from source code via uv (original path).
-func (sm *ServiceManager) startServiceSource(serviceDef *ServiceDefinition) error {
-	// Build environment variables
-	env := sm.orchestrator.getDefaultEnvWithKeys(serviceDef.Env)
+	utils.LogDebug(fmt.Sprintf("Starting %s from binary: %s\n", serviceDef.Name, binaryPath))
 
-	// Build command args - replace "uv" with full path if needed
-	command := serviceDef.Command
-	if command == "uv" {
-		// Use the full path to uv to avoid PATH issues
-		command = sm.orchestrator.pythonEnvMgr.uvManager.GetUVPath()
-	}
-	cmdArgs := append([]string{command}, serviceDef.Args...)
+	env := sm.orchestrator.getBinaryEnv(serviceDef.Env)
 
-	// Get source directory
+	// PyApp binaries are self-contained; use the LF data dir as working directory
 	lfDir, err := utils.GetLFDataDir()
 	if err != nil {
-		return fmt.Errorf("source mode: could not resolve data directory: %w", err)
+		return fmt.Errorf("could not resolve data directory: %w", err)
 	}
-	sourceDir := filepath.Join(lfDir, "src")
-	workDir := filepath.Join(sourceDir, serviceDef.WorkDir)
+
+	// Always pass LF_DATA_DIR so the Python settings use the CLI-resolved value.
+	// This prevents path mismatches when Path.home() fails inside PyApp (e.g., on
+	// Windows where USERPROFILE may not be inherited).
+	env = append(env, fmt.Sprintf("LF_DATA_DIR=%s", lfDir))
 
 	// Inject addon paths into PYTHONPATH
 	env = sm.injectAddonPythonPath(serviceDef.Name, env)
 
-	return sm.orchestrator.processMgr.StartProcess(serviceDef.Name, workDir, env, cmdArgs...)
+	return sm.orchestrator.processMgr.StartProcess(serviceDef.Name, lfDir, env, binaryPath)
 }
 
 // getAddonPythonPaths returns PYTHONPATH entries for installed addons that apply to this service.
@@ -526,33 +478,6 @@ func (sm *ServiceManager) injectAddonPythonPath(serviceName string, env []string
 	return env
 }
 
-// startServiceBinary starts a service from a pre-built PyApp binary.
-func (sm *ServiceManager) startServiceBinary(serviceDef *ServiceDefinition) error {
-	binaryPath, err := ResolveBinaryPath(serviceDef.Name)
-	if err != nil {
-		return fmt.Errorf("binary mode: %w", err)
-	}
-
-	utils.LogDebug(fmt.Sprintf("Starting %s from binary: %s\n", serviceDef.Name, binaryPath))
-
-	env := sm.orchestrator.getBinaryEnv(serviceDef.Env)
-
-	// PyApp binaries are self-contained; use the LF data dir as working directory
-	lfDir, err := utils.GetLFDataDir()
-	if err != nil {
-		return fmt.Errorf("binary mode: could not resolve data directory: %w", err)
-	}
-
-	// Always pass LF_DATA_DIR so the Python settings use the CLI-resolved value.
-	// This prevents path mismatches when Path.home() fails inside PyApp (e.g., on
-	// Windows where USERPROFILE may not be inherited).
-	env = append(env, fmt.Sprintf("LF_DATA_DIR=%s", lfDir))
-
-	// Inject addon paths into PYTHONPATH
-	env = sm.injectAddonPythonPath(serviceDef.Name, env)
-
-	return sm.orchestrator.processMgr.StartProcess(serviceDef.Name, lfDir, env, binaryPath)
-}
 
 // isServiceHealthy checks if a service is healthy by querying its health component
 func (sm *ServiceManager) isServiceHealthy(serviceDef *ServiceDefinition) bool {

@@ -7,32 +7,6 @@ import (
 	"testing"
 )
 
-func TestIsBinaryMode(t *testing.T) {
-	orig, origSet := os.LookupEnv("LF_DEPLOY_MODE")
-	defer func() {
-		if origSet {
-			os.Setenv("LF_DEPLOY_MODE", orig)
-		} else {
-			os.Unsetenv("LF_DEPLOY_MODE")
-		}
-	}()
-
-	os.Setenv("LF_DEPLOY_MODE", "binary")
-	if !IsBinaryMode() {
-		t.Error("expected IsBinaryMode() = true when LF_DEPLOY_MODE=binary")
-	}
-
-	os.Setenv("LF_DEPLOY_MODE", "")
-	if IsBinaryMode() {
-		t.Error("expected IsBinaryMode() = false when LF_DEPLOY_MODE is empty")
-	}
-
-	os.Unsetenv("LF_DEPLOY_MODE")
-	if IsBinaryMode() {
-		t.Error("expected IsBinaryMode() = false when LF_DEPLOY_MODE is unset")
-	}
-}
-
 func TestGetBinDir(t *testing.T) {
 	origBinDir, origBinDirSet := os.LookupEnv("LF_BIN_DIR")
 	origDataDir, origDataDirSet := os.LookupEnv("LF_DATA_DIR")

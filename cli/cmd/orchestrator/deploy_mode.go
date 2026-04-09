@@ -17,12 +17,6 @@ var serviceBinaryNames = map[string]string{
 	"universal-runtime": "llamafarm-runtime",
 }
 
-// IsBinaryMode returns true when services should be launched from pre-built
-// PyApp binaries instead of via uv + source.
-func IsBinaryMode() bool {
-	return os.Getenv("LF_DEPLOY_MODE") == "binary"
-}
-
 // GetBinDir returns the directory where service binaries are located.
 // Priority: LF_BIN_DIR env var > {LF_DATA_DIR}/bin (i.e. ~/.llamafarm/bin/).
 func GetBinDir() (string, error) {
