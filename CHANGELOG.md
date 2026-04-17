@@ -1,5 +1,24 @@
 # Changelog
 
+## [0.1.0](https://github.com/llama-farm/llamafarm/compare/v0.0.30...v0.1.0) (2026-04-17)
+
+
+### Features
+
+* **ci:** add ref input to docker build workflow ([2f83127](https://github.com/llama-farm/llamafarm/commit/2f83127cd9c076f4bd1f4d35223ac53f904013f4))
+
+
+### Bug Fixes
+
+* **ci:** preserve multi-arch manifest when retagging release images ([97361a1](https://github.com/llama-farm/llamafarm/commit/97361a1f9ff09c2269a23cfd1957566c34c4c5f2))
+* **ci:** use checked-out SHA for docker image tags, not workflow SHA ([614b808](https://github.com/llama-farm/llamafarm/commit/614b80854fdaba662ff920038bc2d724364a46cb))
+* **ci:** use checked-out SHA for docker image tags, not workflow SHA ([1e41756](https://github.com/llama-farm/llamafarm/commit/1e417566b56509cfc957af16c9be84cb400b2494))
+* **cli:** recurse into subdirectories when scanning HF cache for GGUFs ([#814](https://github.com/llama-farm/llamafarm/issues/814)) ([ffbd3f7](https://github.com/llama-farm/llamafarm/commit/ffbd3f701bba1b359c7ed962c217eae3ba9f72b0))
+* **edge:** resolve model format from local dir before HF API ([#817](https://github.com/llama-farm/llamafarm/issues/817)) ([e9f89ec](https://github.com/llama-farm/llamafarm/commit/e9f89eca5fe1bb0a596831ccb5cf088a24d0c078))
+* **llamafarm-llama:** fetch model chat template + prepend BOS in raw completions ([#820](https://github.com/llama-farm/llamafarm/issues/820)) ([2dd8278](https://github.com/llama-farm/llamafarm/commit/2dd827868cdf99a8729e5765b10610d29526b75c))
+* **llamafarm-llama:** honor temperature=0 as greedy, wire up repeat_penalty ([#818](https://github.com/llama-farm/llamafarm/issues/818)) ([eb25906](https://github.com/llama-farm/llamafarm/commit/eb25906ca0cacdd2ca60d1f1a537c92b4334cc73))
+* **llamafarm-llama:** restore fixes lost in merge + add regression tests ([1e58071](https://github.com/llama-farm/llamafarm/commit/1e58071b54c88cc10072963827a148c278028f97))
+
 ## [0.0.30](https://github.com/llama-farm/llamafarm/compare/v0.0.29...v0.0.30) (2026-04-09)
 
 
