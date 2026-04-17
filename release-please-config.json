@@ -22,6 +22,10 @@
     },
     "models": {
       "release-type": "python"
+    },
+    ".": {
+      "release-type": "simple",
+      "release-as": "0.0.31"
     }
   }
 }
