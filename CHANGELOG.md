@@ -1,6 +1,6 @@
 # Changelog
 
-## [0.1.0](https://github.com/llama-farm/llamafarm/compare/v0.0.30...v0.1.0) (2026-04-17)
+## [0.0.31](https://github.com/llama-farm/llamafarm/compare/v0.0.30...v0.0.31) (2026-04-17)
 
 
 ### Features
@@ -983,7 +983,7 @@
 
 * release 0.0.1 ([1517073](https://github.com/llama-farm/llamafarm/commit/1517073440afe0054407e46362794c3316cc579d))
 
-## 0.1.0 (2025-08-21)
+## 0.0.31 (2025-08-21)
 
 ### 🚀 Features
 
