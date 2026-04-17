@@ -98,7 +98,7 @@ jobs:
             exit 1
           fi
 
-          # Now retag the images
+          # Retag the images using imagetools to preserve multi-arch manifests
           echo "Retagging Docker images..."
           for SERVICE in "${SERVICES[@]}"; do
             SRC1="${REGISTRY}/${IMAGE_NAME}/${SERVICE}:${TAG}-${FULL_SHA}"
@@ -106,23 +106,27 @@ jobs:
             DST="${REGISTRY}/${IMAGE_NAME}/${SERVICE}:${TAG}"
 
             echo "Attempting to retag ${SERVICE} from ${SRC1} -> ${DST}"
-            if docker pull "${SRC1}"; then
-              docker tag "${SRC1}" "${DST}"
-              docker push "${DST}"
-              echo "Retagged ${SERVICE} using full SHA"
+            if docker buildx imagetools create --tag "${DST}" "${SRC1}" 2>/dev/null; then
+              echo "Retagged ${SERVICE} using full SHA (multi-arch preserved)"
               continue
             fi
 
             echo "Full SHA tag not found, trying short SHA: ${SRC2}"
-            if docker pull "${SRC2}"; then
-              docker tag "${SRC2}" "${DST}"
-              docker push "${DST}"
-              echo "Retagged ${SERVICE} using short SHA"
+            if docker buildx imagetools create --tag "${DST}" "${SRC2}" 2>/dev/null; then
+              echo "Retagged ${SERVICE} using short SHA (multi-arch preserved)"
               continue
             fi
 
             echo "ERROR: Could not find source image for ${SERVICE} with either ${SRC1} or ${SRC2}" >&2
             exit 1
+          done
+
+          # Verify multi-arch manifests
+          echo "Verifying multi-arch manifests..."
+          for SERVICE in "${SERVICES[@]}"; do
+            DST="${REGISTRY}/${IMAGE_NAME}/${SERVICE}:${TAG}"
+            echo "Inspecting ${DST}:"
+            docker buildx imagetools inspect "${DST}"
           done
 
           echo "Docker images retagged for ${TAG}"
