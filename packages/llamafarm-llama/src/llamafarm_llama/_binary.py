@@ -41,11 +41,11 @@ LLAMA_CPP_REPO = "ggml-org/llama.cpp"
 
 
 def _get_llamafarm_release_version() -> str:
-    """Get LlamaFarm release version for ARM64 binary downloads.
+    """Get LlamaFarm release version for custom-built llama.cpp binary downloads.
 
-    The ARM64 llama.cpp binary is published as part of the main LlamaFarm
-    monorepo release (e.g., v0.0.28), NOT the llamafarm-llama package version.
-    These versions are decoupled.
+    Custom binaries (Linux ARM64, Linux CUDA) are published as part of the
+    main LlamaFarm monorepo release (e.g., v0.0.28), NOT the llamafarm-llama
+    package version. These versions are decoupled.
 
     Priority:
     1. LLAMAFARM_RELEASE_VERSION env var (explicit override)
@@ -73,11 +73,11 @@ def _get_llamafarm_release_version() -> str:
             tag = data.get("tag_name")
             assets = data.get("assets", [])
             asset_names = [a.get("name", "") for a in assets]
-            if tag and any("arm64" in name for name in asset_names):
+            if tag and any(("arm64" in n) or ("cuda" in n) for n in asset_names):
                 logger.info(f"Using latest LlamaFarm release: {tag}")
                 return tag
             elif tag:
-                logger.debug(f"Latest release {tag} has no ARM64 asset, skipping")
+                logger.debug(f"Latest release {tag} has no custom llama.cpp asset, skipping")
     except Exception as e:
         logger.debug(f"Could not query GitHub for latest release: {e}")
 
@@ -105,6 +105,19 @@ BINARY_MANIFEST: dict[tuple[str, str, str], dict] = {
     # Linux ARM64 (LlamaFarm provided - not available from upstream)
     ("linux", "arm64", "cpu"): {
         "artifact": "https://github.com/llama-farm/llamafarm/releases/download/{llamafarm_version}/llama-{version}-bin-linux-arm64.zip",
+        "lib": "libllama.so",
+        "sha256": None,
+    },
+    # Linux x86_64 CUDA (LlamaFarm provided - upstream stopped shipping these
+    # for Linux as of b7694; CUDA is split by major version because llama.cpp
+    # binaries are linked against a specific CUDA major).
+    ("linux", "x86_64", "cuda12"): {
+        "artifact": "https://github.com/llama-farm/llamafarm/releases/download/{llamafarm_version}/llama-{version}-bin-linux-cuda12-x86_64.zip",
+        "lib": "libllama.so",
+        "sha256": None,
+    },
+    ("linux", "x86_64", "cuda13"): {
+        "artifact": "https://github.com/llama-farm/llamafarm/releases/download/{llamafarm_version}/llama-{version}-bin-linux-cuda13-x86_64.zip",
         "lib": "libllama.so",
         "sha256": None,
     },
@@ -255,9 +268,9 @@ def _detect_backend(system: str, machine: str) -> str:
 
     # Check for CUDA (only CUDA 12+ is supported; CUDA 11 falls back to CPU)
     if _has_cuda():
-        cuda_version = _get_cuda_version()
-        if cuda_version >= 12:
-            return "cuda12"
+        cuda_backend = _get_cuda_version()
+        if cuda_backend is not None:
+            return cuda_backend
         # CUDA 11 not supported by upstream llama.cpp b7694+, fall through to CPU
 
     # Check for Vulkan
@@ -290,10 +303,42 @@ def _has_cuda() -> bool:
     return False
 
 
-def _get_cuda_version() -> int:
-    """Get major CUDA version."""
+def _get_cuda_version() -> Optional[str]:
+    """Detect the CUDA major version supported by the host driver.
+
+    Returns the BINARY_MANIFEST backend key — "cuda13" or "cuda12" — picking
+    the highest version the installed driver can run, or None when CUDA is
+    not available or only an unsupported (< 12) version is available.
+
+    Detection strategy:
+      1. Parse the "CUDA Version: X.Y" line from `nvidia-smi`'s text output
+         (this is the maximum CUDA runtime the driver supports).
+      2. Fall back to mapping the driver version when (1) is unavailable
+         (some minimal driver installs lack the text output).
+    """
+    import re
     import subprocess
 
+    # Strategy 1: parse "CUDA Version: X.Y" from nvidia-smi
+    try:
+        output = subprocess.check_output(
+            ["nvidia-smi"],
+            stderr=subprocess.DEVNULL,
+            text=True,
+            timeout=5,
+        )
+        m = re.search(r"CUDA Version:\s*(\d+)", output)
+        if m:
+            major = int(m.group(1))
+            if major >= 13:
+                return "cuda13"
+            if major >= 12:
+                return "cuda12"
+            return None
+    except Exception:
+        pass
+
+    # Strategy 2: driver version mapping (CUDA 13 needs >= 580, CUDA 12 needs >= 525)
     try:
         output = subprocess.check_output(
             ["nvidia-smi", "--query-gpu=driver_version", "--format=csv,noheader"],
@@ -301,13 +346,15 @@ def _get_cuda_version() -> int:
             text=True,
             timeout=5,
         )
-        # Map driver version to CUDA version (approximate)
-        driver = float(output.strip().split(".")[0])
+        driver = float(output.strip().splitlines()[0].split(".")[0])
+        if driver >= 580:
+            return "cuda13"
         if driver >= 525:
-            return 12
-        return 11
+            return "cuda12"
     except Exception:
-        return 11
+        pass
+
+    return None
 
 
 def _has_vulkan() -> bool:
@@ -695,13 +742,14 @@ def download_binary(
             raise RuntimeError(f"No pre-built binary available for {platform_key}")
 
     manifest = BINARY_MANIFEST[platform_key]
-    if platform_key == ("linux", "arm64", "cpu"):
-        # Use full URL from manifest for our custom builds (hosted on LlamaFarm releases)
+    artifact_template = manifest["artifact"]
+    if "{llamafarm_version}" in artifact_template:
+        # Custom build hosted on LlamaFarm releases (Linux ARM64, Linux CUDA, etc.)
         llamafarm_version = _get_llamafarm_release_version()
-        url = manifest["artifact"].format(version=version, llamafarm_version=llamafarm_version)
+        url = artifact_template.format(version=version, llamafarm_version=llamafarm_version)
         artifact = url.split("/")[-1]
     else:
-        artifact = manifest["artifact"].format(version=version)
+        artifact = artifact_template.format(version=version)
         url = f"https://github.com/{LLAMA_CPP_REPO}/releases/download/{version}/{artifact}"
 
     logger.info(f"Downloading llama.cpp {version} for {platform_key}...")

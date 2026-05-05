@@ -2,6 +2,7 @@
 
 import os
 import platform
+import subprocess
 from pathlib import Path
 from unittest.mock import patch
 
@@ -151,6 +152,102 @@ class TestBinaryManifest:
         from llamafarm_llama._binary import BINARY_MANIFEST
 
         assert ("win32", "amd64", "cpu") in BINARY_MANIFEST
+
+    def test_manifest_has_linux_cuda12(self):
+        """Manifest should have Linux x86_64 CUDA 12 build (LlamaFarm provided)."""
+        from llamafarm_llama._binary import BINARY_MANIFEST
+
+        entry = BINARY_MANIFEST[("linux", "x86_64", "cuda12")]
+        assert "{llamafarm_version}" in entry["artifact"]
+        assert "cuda12-x86_64.zip" in entry["artifact"]
+        assert entry["lib"] == "libllama.so"
+
+    def test_manifest_has_linux_cuda13(self):
+        """Manifest should have Linux x86_64 CUDA 13 build (LlamaFarm provided)."""
+        from llamafarm_llama._binary import BINARY_MANIFEST
+
+        entry = BINARY_MANIFEST[("linux", "x86_64", "cuda13")]
+        assert "{llamafarm_version}" in entry["artifact"]
+        assert "cuda13-x86_64.zip" in entry["artifact"]
+        assert entry["lib"] == "libllama.so"
+
+
+class TestCudaVersionDetection:
+    """Test _get_cuda_version() backend selection."""
+
+    def _smi_output(self, cuda_version: str) -> str:
+        """Build a minimal nvidia-smi output containing the CUDA Version field."""
+        return (
+            "Mon May  5 12:00:00 2026\n"
+            "+-----------------------------------------------------------------------------+\n"
+            f"| NVIDIA-SMI 580.00   Driver Version: 580.00   CUDA Version: {cuda_version}     |\n"
+            "+-----------------------------------------------------------------------------+\n"
+        )
+
+    def test_returns_cuda13_when_driver_supports_13(self, monkeypatch):
+        from llamafarm_llama import _binary
+
+        def fake_check_output(cmd, *args, **kwargs):
+            assert cmd[0] == "nvidia-smi"
+            # First call (no --query) returns the text dump.
+            if len(cmd) == 1:
+                return self._smi_output("13.0")
+            raise AssertionError(f"unexpected command {cmd}")
+
+        monkeypatch.setattr(subprocess, "check_output", fake_check_output)
+        assert _binary._get_cuda_version() == "cuda13"
+
+    def test_returns_cuda12_when_driver_supports_12(self, monkeypatch):
+        from llamafarm_llama import _binary
+
+        def fake_check_output(cmd, *args, **kwargs):
+            if len(cmd) == 1:
+                return self._smi_output("12.4")
+            raise AssertionError(f"unexpected command {cmd}")
+
+        monkeypatch.setattr(subprocess, "check_output", fake_check_output)
+        assert _binary._get_cuda_version() == "cuda12"
+
+    def test_returns_none_when_cuda_too_old(self, monkeypatch):
+        """CUDA 11 and below are unsupported and should fall back to CPU."""
+        from llamafarm_llama import _binary
+
+        def fake_check_output(cmd, *args, **kwargs):
+            if len(cmd) == 1:
+                return self._smi_output("11.8")
+            raise AssertionError(f"unexpected command {cmd}")
+
+        monkeypatch.setattr(subprocess, "check_output", fake_check_output)
+        assert _binary._get_cuda_version() is None
+
+    def test_returns_none_when_nvidia_smi_missing(self, monkeypatch):
+        """No CUDA → None, never raises."""
+        from llamafarm_llama import _binary
+
+        def fake_check_output(cmd, *args, **kwargs):
+            raise FileNotFoundError("nvidia-smi not found")
+
+        monkeypatch.setattr(subprocess, "check_output", fake_check_output)
+        assert _binary._get_cuda_version() is None
+
+    def test_falls_back_to_driver_version_mapping(self, monkeypatch):
+        """When the text dump lacks 'CUDA Version', use driver-version fallback."""
+        from llamafarm_llama import _binary
+
+        calls = {"n": 0}
+
+        def fake_check_output(cmd, *args, **kwargs):
+            calls["n"] += 1
+            if len(cmd) == 1:
+                # No "CUDA Version:" line → falls through to strategy 2.
+                return "minimal nvidia-smi output without cuda field\n"
+            # Strategy 2: --query-gpu=driver_version
+            assert "--query-gpu=driver_version" in cmd
+            return "535.183.01\n"
+
+        monkeypatch.setattr(subprocess, "check_output", fake_check_output)
+        assert _binary._get_cuda_version() == "cuda12"
+        assert calls["n"] == 2
 
     def test_manifest_entries_have_artifact(self):
         """All manifest entries should have artifact key."""
