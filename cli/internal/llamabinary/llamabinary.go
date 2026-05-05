@@ -65,9 +65,9 @@ var ValidAccelerators = []string{"cpu", "cuda", "metal", "vulkan", "rocm"}
 
 // acceptArchAliases maps user-friendly arch names to canonical Go arch names.
 var acceptArchAliases = map[string]string{
-	"x86_64": "amd64",
-	"amd64":  "amd64",
-	"arm64":  "arm64",
+	"x86_64":  "amd64",
+	"amd64":   "amd64",
+	"arm64":   "arm64",
 	"aarch64": "arm64",
 }
 
@@ -322,6 +322,64 @@ func logf(format string, args ...any) {
 	}
 }
 
+var executablePath = os.Executable
+var evaluateSymlinks = filepath.EvalSymlinks
+
+func bundleArchName(arch string) string {
+	switch arch {
+	case "amd64":
+		return "x86_64"
+	default:
+		return arch
+	}
+}
+
+// TODO: extend the bundle path layout if we ever ship accelerator-specific
+// llama.cpp artifacts alongside the CPU-first bundles.
+func bundlePlatformDir(t Target) string {
+	return fmt.Sprintf("%s-%s", t.OS, bundleArchName(t.Arch))
+}
+
+// BundledBinaryPath returns the executable-adjacent bundled llama.cpp path for a
+// target if it exists. Bundles are staged as:
+//
+//	<exe-dir>/llama-cpp/<os>-<arch>/<binary-name>
+//
+// Bundles ship the platform-default accelerator only (metal on darwin/arm64,
+// CPU elsewhere). Requests for non-default accelerators (e.g. cuda) skip the
+// bundle and go through the download path so the caller gets the right
+// runtime, never a silent CPU fallback.
+func BundledBinaryPath(t Target) (string, bool) {
+	if t.Accelerator != BestAcceleratorFor(t.OS, t.Arch) {
+		return "", false
+	}
+	exePath, err := executablePath()
+	if err != nil {
+		logf("warning: determine executable path: %v", err)
+		return "", false
+	}
+	if resolved, err := evaluateSymlinks(exePath); err == nil {
+		exePath = resolved
+	}
+	exePath, err = filepath.Abs(exePath)
+	if err != nil {
+		logf("warning: resolve executable path: %v", err)
+		return "", false
+	}
+
+	bundledPath := filepath.Join(
+		filepath.Dir(exePath),
+		"llama-cpp",
+		bundlePlatformDir(t),
+		LibNameFor(t.OS),
+	)
+	st, err := os.Stat(bundledPath)
+	if err != nil || st.IsDir() || st.Size() == 0 {
+		return "", false
+	}
+	return bundledPath, true
+}
+
 // Download ensures the llama.cpp binary for (target, version) is installed in its
 // platform-scoped cache directory. If the binary is already present, Download is a
 // no-op and returns Cached=true.
@@ -341,6 +399,25 @@ func Download(ctx context.Context, t Target, version string) (Result, error) {
 
 	if IsCached(t, version) {
 		logf("llama.cpp already cached at %s", libPath)
+		return Result{LibPath: libPath, DestDir: destDir, Cached: true}, nil
+	}
+	if bundledPath, ok := BundledBinaryPath(t); ok {
+		// Seed the cache from the bundle so downstream tooling that depends on
+		// the cache layout (Export, lf runtime binary pull --export, etc.)
+		// keeps working without special-casing the bundled scenario. The seed
+		// happens via a sibling staging dir + atomic rename so a mid-copy
+		// failure can never leave a half-populated destDir for IsCached to
+		// observe as valid.
+		if err := seedCacheFromBundle(filepath.Dir(bundledPath), destDir); err != nil {
+			// Re-check IsCached: a concurrent invocation may have won the race
+			// and left a fully-populated cache while ours was still staging.
+			if IsCached(t, version) {
+				logf("cache populated by concurrent seed at %s", libPath)
+				return Result{LibPath: libPath, DestDir: destDir, Cached: true}, nil
+			}
+			return Result{}, fmt.Errorf("seed cache from bundle: %w", err)
+		}
+		logf("seeded cache from bundled llama.cpp at %s", bundledPath)
 		return Result{LibPath: libPath, DestDir: destDir, Cached: true}, nil
 	}
 
@@ -445,14 +522,67 @@ func Export(t Target, version string, destDir string) error {
 	if err := os.MkdirAll(destDir, 0o755); err != nil {
 		return fmt.Errorf("create export dir: %w", err)
 	}
+	return copyDirContents(srcDir, destDir)
+}
+
+// seedCacheFromBundle atomically copies the contents of bundleDir into
+// destDir. The copy goes through a sibling staging directory and is renamed
+// into place only after every file lands successfully, so a partially-copied
+// state can never be observed by IsCached. Stale staging directories from
+// previous killed runs are cleaned up on entry.
+func seedCacheFromBundle(bundleDir, destDir string) error {
+	parentDir := filepath.Dir(destDir)
+	if err := os.MkdirAll(parentDir, 0o755); err != nil {
+		return fmt.Errorf("create parent dir: %w", err)
+	}
+
+	// Sweep stale staging dirs from prior crashed runs.
+	if entries, err := os.ReadDir(parentDir); err == nil {
+		basePrefix := filepath.Base(destDir) + ".seed-"
+		for _, entry := range entries {
+			if strings.HasPrefix(entry.Name(), basePrefix) {
+				_ = os.RemoveAll(filepath.Join(parentDir, entry.Name()))
+			}
+		}
+	}
+
+	stagingDir, err := os.MkdirTemp(parentDir, filepath.Base(destDir)+".seed-*")
+	if err != nil {
+		return fmt.Errorf("create staging dir: %w", err)
+	}
+	// Best-effort cleanup of the staging dir if we exit before rename succeeds.
+	cleanup := true
+	defer func() {
+		if cleanup {
+			_ = os.RemoveAll(stagingDir)
+		}
+	}()
+
+	if err := copyDirContents(bundleDir, stagingDir); err != nil {
+		return err
+	}
+
+	if err := os.Rename(stagingDir, destDir); err != nil {
+		// destDir may already exist (rare race with a concurrent seed). Leave
+		// the cleanup deferred to remove our staging dir; caller decides.
+		return fmt.Errorf("publish cache dir: %w", err)
+	}
+	cleanup = false
+	return nil
+}
+
+// copyDirContents copies every regular file and symlink from srcDir into
+// dstDir, preserving symlink targets. It does not recurse into subdirectories,
+// matching the flat layout used for both cache and export directories.
+func copyDirContents(srcDir, dstDir string) error {
 	entries, err := os.ReadDir(srcDir)
 	if err != nil {
-		return fmt.Errorf("read cache dir: %w", err)
+		return fmt.Errorf("read source dir: %w", err)
 	}
 	for _, entry := range entries {
 		name := entry.Name()
 		srcPath := filepath.Join(srcDir, name)
-		dstPath := filepath.Join(destDir, name)
+		dstPath := filepath.Join(dstDir, name)
 		info, err := os.Lstat(srcPath)
 		if err != nil {
 			return fmt.Errorf("lstat %s: %w", srcPath, err)
@@ -463,7 +593,6 @@ func Export(t Target, version string, destDir string) error {
 			if err != nil {
 				return fmt.Errorf("readlink %s: %w", srcPath, err)
 			}
-			// Remove any existing file at dstPath first.
 			os.Remove(dstPath)
 			if err := os.Symlink(target, dstPath); err != nil {
 				return fmt.Errorf("symlink %s: %w", dstPath, err)

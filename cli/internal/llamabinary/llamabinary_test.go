@@ -1,6 +1,9 @@
 package llamabinary
 
 import (
+	"context"
+	"net/http"
+	"net/http/httptest"
 	"os"
 	"path/filepath"
 	"strings"
@@ -228,6 +231,212 @@ func TestLibPath_ReturnsExpectedFile(t *testing.T) {
 	}
 	if !strings.HasSuffix(p, "libllama.dylib") {
 		t.Errorf("got %s", p)
+	}
+}
+
+func TestBundledBinaryPath_PrefersBundledOverDownload(t *testing.T) {
+	tmp := t.TempDir()
+	exePath := filepath.Join(tmp, "lf")
+	if err := os.WriteFile(exePath, []byte("stub"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+
+	target := Target{OS: "linux", Arch: "amd64", Accelerator: "cpu"}
+	bundleDir := filepath.Join(tmp, "llama-cpp", "linux-x86_64")
+	bundledPath := filepath.Join(bundleDir, LibNameFor(target.OS))
+	if err := os.MkdirAll(bundleDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(bundledPath, []byte("bundled"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	// Drop a sidecar dependency to verify the seeder copies the whole dir.
+	depPath := filepath.Join(bundleDir, "libggml.so")
+	if err := os.WriteFile(depPath, []byte("dep"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+
+	oldExecutablePath := executablePath
+	oldEvaluateSymlinks := evaluateSymlinks
+	executablePath = func() (string, error) { return exePath, nil }
+	evaluateSymlinks = func(path string) (string, error) { return path, nil }
+	t.Cleanup(func() {
+		executablePath = oldExecutablePath
+		evaluateSymlinks = oldEvaluateSymlinks
+	})
+
+	cacheRoot := filepath.Join(tmp, "cache")
+	t.Setenv("LLAMAFARM_CACHE_DIR", cacheRoot)
+
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		t.Fatalf("unexpected HTTP request to %s", r.URL.String())
+	}))
+	defer srv.Close()
+
+	testVersion := "bTESTBUNDLE"
+	SetTestSpecForOverride(func(tt Target, v string) (Spec, error) {
+		if tt == target && v == testVersion {
+			return Spec{
+				URL:     srv.URL + "/llama.tar.gz",
+				LibPath: LibNameFor(target.OS),
+				LibName: LibNameFor(target.OS),
+			}, nil
+		}
+		return Spec{}, ErrSpecNotAvailable
+	})
+	defer SetTestSpecForOverride(nil)
+
+	res, err := Download(context.Background(), target, testVersion)
+	if err != nil {
+		t.Fatalf("Download: %v", err)
+	}
+	if !res.Cached {
+		t.Error("expected bundled hit to report Cached=true")
+	}
+
+	// The bundle should have seeded the cache: LibPath points at cache, and
+	// the dependency file copies over too.
+	expectedCacheDir, err := CacheDir(target, testVersion)
+	if err != nil {
+		t.Fatalf("CacheDir: %v", err)
+	}
+	expectedLib := filepath.Join(expectedCacheDir, LibNameFor(target.OS))
+	if res.LibPath != expectedLib {
+		t.Errorf("LibPath = %q, want %q", res.LibPath, expectedLib)
+	}
+	if res.DestDir != expectedCacheDir {
+		t.Errorf("DestDir = %q, want %q", res.DestDir, expectedCacheDir)
+	}
+	if data, err := os.ReadFile(expectedLib); err != nil || string(data) != "bundled" {
+		t.Errorf("seeded main lib mismatch: data=%q err=%v", data, err)
+	}
+	seededDep := filepath.Join(expectedCacheDir, "libggml.so")
+	if data, err := os.ReadFile(seededDep); err != nil || string(data) != "dep" {
+		t.Errorf("seeded dep mismatch: data=%q err=%v", data, err)
+	}
+	if !IsCached(target, testVersion) {
+		t.Error("expected IsCached=true after bundle seed")
+	}
+}
+
+func TestBundledBinaryPath_AcceleratorMismatchSkipsBundle(t *testing.T) {
+	tmp := t.TempDir()
+	exePath := filepath.Join(tmp, "lf")
+	if err := os.WriteFile(exePath, []byte("stub"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	bundleDir := filepath.Join(tmp, "llama-cpp", "linux-x86_64")
+	if err := os.MkdirAll(bundleDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	bundledLib := filepath.Join(bundleDir, LibNameFor("linux"))
+	if err := os.WriteFile(bundledLib, []byte("bundled"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+
+	oldExecutablePath := executablePath
+	oldEvaluateSymlinks := evaluateSymlinks
+	executablePath = func() (string, error) { return exePath, nil }
+	evaluateSymlinks = func(path string) (string, error) { return path, nil }
+	t.Cleanup(func() {
+		executablePath = oldExecutablePath
+		evaluateSymlinks = oldEvaluateSymlinks
+	})
+
+	cudaTarget := Target{OS: "linux", Arch: "amd64", Accelerator: "cuda"}
+	if _, ok := BundledBinaryPath(cudaTarget); ok {
+		t.Errorf("expected accelerator mismatch (cuda) to skip bundle, got hit")
+	}
+	cpuTarget := Target{OS: "linux", Arch: "amd64", Accelerator: "cpu"}
+	if _, ok := BundledBinaryPath(cpuTarget); !ok {
+		t.Errorf("expected default accelerator (cpu on linux/amd64) to hit bundle")
+	}
+}
+
+func TestBundledSeed_PartialCopyDoesNotPoisonCache(t *testing.T) {
+	if os.Geteuid() == 0 {
+		t.Skip("can't induce permission-denied copy failure as root")
+	}
+
+	tmp := t.TempDir()
+	exePath := filepath.Join(tmp, "lf")
+	if err := os.WriteFile(exePath, []byte("stub"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+
+	target := Target{OS: "linux", Arch: "amd64", Accelerator: "cpu"}
+	bundleDir := filepath.Join(tmp, "llama-cpp", "linux-x86_64")
+	if err := os.MkdirAll(bundleDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+
+	// Lay out the bundle so the readable main lib sorts BEFORE the unreadable
+	// dep. os.ReadDir returns sorted entries, so the iteration order is:
+	//   1. libllama.so   (readable, written first into staging)
+	//   2. zzzz_unread.so (mode 0000 -> os.Open fails -> error returned)
+	// Without the atomic staging+rename, libllama.so would land directly in
+	// destDir and IsCached would lie. With it, destDir is never created.
+	mainLib := filepath.Join(bundleDir, LibNameFor(target.OS))
+	if err := os.WriteFile(mainLib, []byte("bundled-main"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	depPath := filepath.Join(bundleDir, "zzzz_unread.so")
+	if err := os.WriteFile(depPath, []byte("dep"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Chmod(depPath, 0o000); err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = os.Chmod(depPath, 0o644) })
+
+	oldExecutablePath := executablePath
+	oldEvaluateSymlinks := evaluateSymlinks
+	executablePath = func() (string, error) { return exePath, nil }
+	evaluateSymlinks = func(path string) (string, error) { return path, nil }
+	t.Cleanup(func() {
+		executablePath = oldExecutablePath
+		evaluateSymlinks = oldEvaluateSymlinks
+	})
+
+	cacheRoot := filepath.Join(tmp, "cache")
+	t.Setenv("LLAMAFARM_CACHE_DIR", cacheRoot)
+
+	// Any HTTP request would mean we fell through to the download path; that's
+	// not what we're testing.
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		t.Fatalf("unexpected HTTP request to %s", r.URL.String())
+	}))
+	defer srv.Close()
+	SetTestSpecForOverride(func(tt Target, v string) (Spec, error) {
+		return Spec{}, ErrSpecNotAvailable
+	})
+	defer SetTestSpecForOverride(nil)
+
+	testVersion := "bTESTPARTIAL"
+	if _, err := Download(context.Background(), target, testVersion); err == nil {
+		t.Fatal("expected Download to fail when bundle contains an unreadable file")
+	}
+
+	// Atomicity guarantees: the cache dir must not exist after a failed seed.
+	if IsCached(target, testVersion) {
+		t.Errorf("IsCached must be false after a failed seed (cache must not be poisoned)")
+	}
+	cacheDir, err := CacheDir(target, testVersion)
+	if err != nil {
+		t.Fatalf("CacheDir: %v", err)
+	}
+	if _, err := os.Stat(cacheDir); !os.IsNotExist(err) {
+		t.Errorf("expected cache dir to not exist; stat err=%v", err)
+	}
+
+	// And no leftover staging dirs from the failed attempt.
+	if entries, err := os.ReadDir(filepath.Dir(cacheDir)); err == nil {
+		stagingPrefix := filepath.Base(cacheDir) + ".seed-"
+		for _, e := range entries {
+			if strings.HasPrefix(e.Name(), stagingPrefix) {
+				t.Errorf("leftover staging dir not cleaned up: %s", e.Name())
+			}
+		}
 	}
 }
 

@@ -14,7 +14,6 @@ import subprocess
 import tarfile
 import tempfile
 import zipfile
-from importlib import metadata
 from pathlib import Path
 from typing import Optional
 from urllib.error import HTTPError, URLError
@@ -370,13 +369,17 @@ def get_lib_path() -> Path:
     it raises FileNotFoundError with a structured message pointing at
     `lf runtime binary pull`.
     """
-    # Check for bundled binary (platform wheel)
-    bundled = Path(__file__).parent / "lib" / _get_lib_name()
+    # Resolution order: bundled -> cached -> download.
+    #
+    # The bundled path is preferred over the cache so that a wheel upgrade
+    # which ships a rebuilt binary at the *same* LLAMA_CPP_VERSION (e.g. a
+    # build-flag fix) wins over a stale cached download from a previous
+    # session. A version bump would miss the cache anyway, so this only
+    # affects the same-pin rebuild case.
+    bundled = _bundled_binary_path()
     if bundled.exists():
         logger.debug(f"Using bundled binary: {bundled}")
         return bundled
-
-    # Check for cached download
     cache_dir = _get_cache_dir()
     cached = cache_dir / LLAMA_CPP_VERSION / _get_lib_name()
     if cached.exists():
@@ -392,15 +395,67 @@ def get_lib_path() -> Path:
     return download_binary(cache_dir / LLAMA_CPP_VERSION)
 
 
-def _get_lib_name() -> str:
-    """Get platform-specific library name."""
-    system = platform.system().lower()
+def _get_lib_name_for_system(system: str) -> str:
+    """Get platform-specific library name for a normalized system string."""
     if system == "darwin":
         return "libllama.dylib"
-    elif system == "windows":
+    if system in ("windows", "win32"):
         return "llama.dll"
-    else:
-        return "libllama.so"
+    return "libllama.so"
+
+
+def _get_lib_name() -> str:
+    """Get platform-specific library name."""
+    return _get_lib_name_for_system(platform.system().lower())
+
+
+def _bundled_platform_slug() -> str:
+    """Return the deterministic bundle directory slug for the current host."""
+    system = platform.system().lower()
+    machine = platform.machine().lower()
+    if machine in ("x86_64", "amd64"):
+        machine = "x86_64"
+    elif machine in ("arm64", "aarch64"):
+        machine = "arm64"
+    return f"{system}-{machine}"
+
+
+def _bundled_binary_path() -> Path:
+    """Return the packaged bundled binary path for the current host.
+
+    Returns a path that .exists() only when both the main library AND the
+    runtime-essential ggml dependencies (libggml-base, libggml-cpu, libggml)
+    are co-located. An incomplete bundle would cause libllama to load but
+    its dependencies to fail at backend registration time, leaving the
+    runtime in a broken state that's expensive to debug. By treating
+    incomplete bundles as absent, get_lib_path falls through to the cache
+    and download path — preserving pre-PR behavior whenever the shipped
+    bundle is missing a required dep.
+    """
+    bundled_dir = Path(__file__).parent / "_bundled" / _bundled_platform_slug()
+    system = platform.system().lower()
+    main_lib = bundled_dir / _get_lib_name_for_system(system)
+
+    if not main_lib.exists():
+        return main_lib
+
+    # macOS dylibs and Windows DLLs typically don't need a separate dep check
+    # at this layer (Mach-O has install_name + rpath; Windows DLL search is
+    # handled in _bindings.py). Linux is where missing ggml deps silently
+    # break backend registration, so gate strictly there.
+    if system == "linux":
+        required_globs = (
+            "libggml-base.so*",
+            "libggml-cpu.so*",
+            "libggml.so*",
+        )
+        for pattern in required_globs:
+            if not list(bundled_dir.glob(pattern)):
+                # Return a path inside the bundled dir that will not exist,
+                # so callers see .exists() == False and fall through.
+                return bundled_dir / "__incomplete_bundle__"
+
+    return main_lib
 
 
 def _safe_extract_zip(zip_path: Path, dest_dir: Path) -> None:
@@ -846,21 +901,19 @@ def get_binary_info() -> dict:
     """Get information about the current binary configuration."""
     platform_key = get_platform_key()
     lib_path = None
+    cache_dir = _get_cache_dir()
+    cached = cache_dir / LLAMA_CPP_VERSION / _get_lib_name()
+    bundled = _bundled_binary_path()
 
-    # Check bundled
-    bundled = Path(__file__).parent / "lib" / _get_lib_name()
+    # Match the resolution order in get_lib_path: bundled wins over cache.
     if bundled.exists():
         lib_path = bundled
         source = "bundled"
+    elif cached.exists():
+        lib_path = cached
+        source = "cached"
     else:
-        # Check cached
-        cache_dir = _get_cache_dir()
-        cached = cache_dir / LLAMA_CPP_VERSION / _get_lib_name()
-        if cached.exists():
-            lib_path = cached
-            source = "cached"
-        else:
-            source = "not_downloaded"
+        source = "not_downloaded"
 
     return {
         "version": LLAMA_CPP_VERSION,
@@ -868,6 +921,6 @@ def get_binary_info() -> dict:
         "lib_path": str(lib_path) if lib_path else None,
         "lib_name": _get_lib_name(),
         "source": source,
-        "cache_dir": str(_get_cache_dir()),
+        "cache_dir": str(cache_dir),
         "offline": _is_offline(),
     }
