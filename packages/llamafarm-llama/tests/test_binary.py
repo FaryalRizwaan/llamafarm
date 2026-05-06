@@ -172,6 +172,139 @@ class TestBinaryManifest:
         assert entry["lib"] == "libllama.so"
 
 
+class TestLlamafarmReleaseVersionSelection:
+    """`_get_llamafarm_release_version()` must skip releases that lack the
+    requested asset, so an ARM64 download doesn't 404 because the latest
+    release only ships CUDA binaries (or vice-versa)."""
+
+    def _release(self, tag, asset_names, *, draft=False, prerelease=False):
+        return {
+            "tag_name": tag,
+            "draft": draft,
+            "prerelease": prerelease,
+            "assets": [{"name": n} for n in asset_names],
+        }
+
+    def _patch_releases(self, monkeypatch, releases):
+        """Patch urlopen so the function sees `releases` as the API response."""
+        import json
+
+        from llamafarm_llama import _binary
+
+        # _get_llamafarm_release_version uses `with urlopen(...) as r: r.read()`,
+        # so the fake needs a context-manager shape.
+        class _Resp:
+            def __init__(self, data):
+                self._data = data
+
+            def __enter__(self):
+                return self
+
+            def __exit__(self, *exc):
+                return False
+
+            def read(self):
+                return self._data
+
+        def fake_urlopen(req, timeout=None):  # noqa: ARG001
+            return _Resp(json.dumps(releases).encode())
+
+        monkeypatch.setattr(_binary, "urlopen", fake_urlopen)
+        monkeypatch.delenv("LLAMAFARM_RELEASE_VERSION", raising=False)
+
+    def test_skips_releases_missing_expected_asset(self, monkeypatch):
+        """The newest release ships arm64 only; cuda13 must skip it."""
+        from llamafarm_llama import _binary
+
+        releases = [
+            self._release("v0.0.40", ["llama-b8816-bin-linux-arm64.zip"]),
+            self._release(
+                "v0.0.39",
+                [
+                    "llama-b8816-bin-linux-arm64.zip",
+                    "llama-b8816-bin-linux-cuda13-x86_64.zip",
+                ],
+            ),
+            self._release("v0.0.38", ["unrelated.tar.gz"]),
+        ]
+        self._patch_releases(monkeypatch, releases)
+
+        chosen = _binary._get_llamafarm_release_version(
+            expected_asset="llama-b8816-bin-linux-cuda13-x86_64.zip"
+        )
+        assert chosen == "v0.0.39", (
+            f"expected to skip v0.0.40 (no cuda13 asset), got {chosen}"
+        )
+
+    def test_returns_newest_release_when_asset_present(self, monkeypatch):
+        from llamafarm_llama import _binary
+
+        releases = [
+            self._release(
+                "v0.0.40",
+                [
+                    "llama-b8816-bin-linux-arm64.zip",
+                    "llama-b8816-bin-linux-cuda12-x86_64.zip",
+                ],
+            ),
+            self._release("v0.0.39", ["llama-b8816-bin-linux-cuda12-x86_64.zip"]),
+        ]
+        self._patch_releases(monkeypatch, releases)
+
+        chosen = _binary._get_llamafarm_release_version(
+            expected_asset="llama-b8816-bin-linux-cuda12-x86_64.zip"
+        )
+        assert chosen == "v0.0.40"
+
+    def test_skips_drafts_and_prereleases(self, monkeypatch):
+        from llamafarm_llama import _binary
+
+        releases = [
+            self._release(
+                "v0.0.41-rc1",
+                ["llama-b8816-bin-linux-arm64.zip"],
+                prerelease=True,
+            ),
+            self._release(
+                "v0.0.41-draft",
+                ["llama-b8816-bin-linux-arm64.zip"],
+                draft=True,
+            ),
+            self._release("v0.0.40", ["llama-b8816-bin-linux-arm64.zip"]),
+        ]
+        self._patch_releases(monkeypatch, releases)
+
+        chosen = _binary._get_llamafarm_release_version(
+            expected_asset="llama-b8816-bin-linux-arm64.zip"
+        )
+        assert chosen == "v0.0.40"
+
+    def test_falls_back_when_no_release_carries_asset(self, monkeypatch):
+        from llamafarm_llama import _binary
+
+        releases = [
+            self._release("v0.0.40", ["llama-b8816-bin-linux-arm64.zip"]),
+            self._release("v0.0.39", ["llama-b8816-bin-linux-arm64.zip"]),
+        ]
+        self._patch_releases(monkeypatch, releases)
+
+        chosen = _binary._get_llamafarm_release_version(
+            expected_asset="llama-b8816-bin-linux-cuda13-x86_64.zip"
+        )
+        # Hardcoded fallback returned because no release carried the asset.
+        assert chosen == "v0.0.28"
+
+    def test_env_override_bypasses_validation(self, monkeypatch):
+        from llamafarm_llama import _binary
+
+        monkeypatch.setenv("LLAMAFARM_RELEASE_VERSION", "v9.9.9")
+        # No urlopen patching: env override must short-circuit the API call.
+        chosen = _binary._get_llamafarm_release_version(
+            expected_asset="anything.zip"
+        )
+        assert chosen == "v9.9.9"
+
+
 class TestCudaVersionDetection:
     """Test _get_cuda_version() backend selection."""
 

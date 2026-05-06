@@ -40,19 +40,30 @@ LLAMA_CPP_VERSION = _read_llama_cpp_version()
 LLAMA_CPP_REPO = "ggml-org/llama.cpp"
 
 
-def _get_llamafarm_release_version() -> str:
-    """Get LlamaFarm release version for custom-built llama.cpp binary downloads.
+def _get_llamafarm_release_version(expected_asset: Optional[str] = None) -> str:
+    """Get LlamaFarm release tag hosting `expected_asset`.
 
     Custom binaries (Linux ARM64, Linux CUDA) are published as part of the
     main LlamaFarm monorepo release (e.g., v0.0.28), NOT the llamafarm-llama
-    package version. These versions are decoupled.
+    package version. These versions are decoupled — and any individual
+    release may carry only a subset of the platform-specific binaries (an
+    ARM64 release without CUDA, or vice-versa). Picking "the latest release"
+    blindly therefore yields 404s when the requested artifact is missing.
 
-    Priority:
-    1. LLAMAFARM_RELEASE_VERSION env var (explicit override)
-    2. GitHub API query for latest release with the ARM64 binary
-    3. Hardcoded fallback
+    Behavior:
+    1. LLAMAFARM_RELEASE_VERSION env var → explicit override, returned as-is
+       (the caller is taking responsibility for the choice; not validated).
+    2. GitHub API → walk recent releases newest-first, return the first tag
+       whose assets include `expected_asset`. Skips drafts/prereleases.
+    3. Hardcoded fallback (last known good release that ships the standard
+       custom binaries).
+
+    `expected_asset` is the fully-formatted artifact filename (e.g.
+    `llama-b8816-bin-linux-cuda13-x86_64.zip`). When None, accept any
+    release that carries any custom asset — preserves the original
+    behavior for callers that don't have a specific artifact in mind.
     """
-    # 1. Env var override
+    # 1. Env var override (caller is explicitly choosing a tag).
     env_version = os.environ.get("LLAMAFARM_RELEASE_VERSION")
     if env_version:
         if not env_version.startswith("v"):
@@ -60,28 +71,44 @@ def _get_llamafarm_release_version() -> str:
         logger.info(f"Using LlamaFarm release version from env: {env_version}")
         return env_version
 
-    # 2. Query GitHub API for latest release with ARM64 binary
+    # 2. Walk recent releases looking for one that actually carries the asset.
     try:
         import json
 
         req = Request(
-            "https://api.github.com/repos/llama-farm/llamafarm/releases/latest",
-            headers={"User-Agent": "llamafarm-llama", "Accept": "application/vnd.github.v3+json"},
+            "https://api.github.com/repos/llama-farm/llamafarm/releases?per_page=20",
+            headers={
+                "User-Agent": "llamafarm-llama",
+                "Accept": "application/vnd.github.v3+json",
+            },
         )
         with urlopen(req, timeout=10) as response:
-            data = json.loads(response.read())
-            tag = data.get("tag_name")
-            assets = data.get("assets", [])
-            asset_names = [a.get("name", "") for a in assets]
-            if tag and any(("arm64" in n) or ("cuda" in n) for n in asset_names):
-                logger.info(f"Using latest LlamaFarm release: {tag}")
-                return tag
-            elif tag:
-                logger.debug(f"Latest release {tag} has no custom llama.cpp asset, skipping")
+            releases = json.loads(response.read()) or []
+            for rel in releases:
+                if rel.get("draft") or rel.get("prerelease"):
+                    continue
+                tag = rel.get("tag_name")
+                if not tag:
+                    continue
+                asset_names = [a.get("name", "") for a in rel.get("assets", [])]
+                if expected_asset is not None:
+                    if expected_asset in asset_names:
+                        logger.info(
+                            f"Using LlamaFarm release {tag} (carries {expected_asset})"
+                        )
+                        return tag
+                else:
+                    if any(("arm64" in n) or ("cuda" in n) for n in asset_names):
+                        logger.info(f"Using latest LlamaFarm release: {tag}")
+                        return tag
+            logger.debug(
+                "No recent LlamaFarm release carries asset "
+                f"{expected_asset!r}; using fallback"
+            )
     except Exception as e:
-        logger.debug(f"Could not query GitHub for latest release: {e}")
+        logger.debug(f"Could not query GitHub for releases: {e}")
 
-    # 3. Hardcoded fallback (last known good release with ARM64 binary)
+    # 3. Hardcoded fallback (last known good release with custom binaries).
     fallback = "v0.0.28"
     logger.info(f"Using fallback LlamaFarm release version: {fallback}")
     return fallback
@@ -764,10 +791,15 @@ def download_binary(
     manifest = BINARY_MANIFEST[platform_key]
     artifact_template = manifest["artifact"]
     if "{llamafarm_version}" in artifact_template:
-        # Custom build hosted on LlamaFarm releases (Linux ARM64, Linux CUDA, etc.)
-        llamafarm_version = _get_llamafarm_release_version()
+        # Custom build hosted on LlamaFarm releases (Linux ARM64, Linux CUDA, etc.).
+        # Compute the expected asset filename first so _get_llamafarm_release_version
+        # can pick a release that actually carries it — different releases may ship
+        # different subsets of custom binaries (arm64-only, cuda-only, etc.).
+        # Filename portion of the templates never contains {llamafarm_version},
+        # so it's safe to format with just `version`.
+        artifact = artifact_template.rsplit("/", 1)[-1].format(version=version)
+        llamafarm_version = _get_llamafarm_release_version(expected_asset=artifact)
         url = artifact_template.format(version=version, llamafarm_version=llamafarm_version)
-        artifact = url.split("/")[-1]
     else:
         artifact = artifact_template.format(version=version)
         url = f"https://github.com/{LLAMA_CPP_REPO}/releases/download/{version}/{artifact}"
