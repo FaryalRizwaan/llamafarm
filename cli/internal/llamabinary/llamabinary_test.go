@@ -123,6 +123,9 @@ func TestSpecFor_LinuxAmd64Cuda13UsesLlamaFarmHost(t *testing.T) {
 	if err != nil {
 		t.Fatalf("SpecFor: %v", err)
 	}
+	if !strings.Contains(spec.URL, "llama-farm/llamafarm") {
+		t.Errorf("expected llama-farm host, got %s", spec.URL)
+	}
 	if !strings.Contains(spec.URL, "bin-linux-cuda13-x86_64.zip") {
 		t.Errorf("unexpected artifact in URL: %s", spec.URL)
 	}

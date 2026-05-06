@@ -368,8 +368,11 @@ def _get_cuda_version() -> Optional[str]:
             if major >= 12:
                 return "cuda12"
             return None
-    except Exception:
-        pass
+    except Exception as e:
+        # nvidia-smi missing, broken, or in an unrecognized format; fall through
+        # to the driver-version mapping. Log at debug so the failure is visible
+        # without spamming installs that intentionally have no CUDA.
+        logger.debug(f"CUDA detection strategy 1 (nvidia-smi text parse) failed: {e}")
 
     # Strategy 2: driver version mapping (CUDA 13 needs >= 580, CUDA 12 needs >= 525)
     try:
@@ -384,8 +387,8 @@ def _get_cuda_version() -> Optional[str]:
             return "cuda13"
         if driver >= 525:
             return "cuda12"
-    except Exception:
-        pass
+    except Exception as e:
+        logger.debug(f"CUDA detection strategy 2 (driver-version mapping) failed: {e}")
 
     return None
 
