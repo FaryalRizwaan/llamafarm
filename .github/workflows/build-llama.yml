@@ -147,6 +147,14 @@ jobs:
       - name: Configure CMake
         run: |
           cd llama.cpp
+          # GitHub Actions runners have no NVIDIA driver, so libcuda.so.1 is
+          # absent on the build host. The nvidia/cuda devel image ships a stub
+          # libcuda.so at /usr/local/cuda/lib64/stubs/ for exactly this case;
+          # add it to the linker search path so llama.cpp's executables (tools)
+          # can resolve cuMemCreate/cuDeviceGet/etc. at link time. We don't run
+          # them on the build host — we only ship the .so libraries — so a stub
+          # link is sufficient.
+          STUB_LDFLAGS="-Wl,-rpath-link,/usr/local/cuda/lib64/stubs -L/usr/local/cuda/lib64/stubs"
           cmake -S . -B build \
             -DCMAKE_BUILD_TYPE=Release \
             -DBUILD_SHARED_LIBS=ON \
@@ -154,7 +162,9 @@ jobs:
             -DLLAMA_BUILD_EXAMPLES=OFF \
             -DLLAMA_CURL=OFF \
             -DGGML_NATIVE=OFF \
-            -DGGML_CUDA=ON
+            -DGGML_CUDA=ON \
+            -DCMAKE_EXE_LINKER_FLAGS="$STUB_LDFLAGS" \
+            -DCMAKE_SHARED_LINKER_FLAGS="$STUB_LDFLAGS"
 
       - name: Build
         run: |
