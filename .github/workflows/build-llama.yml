@@ -117,6 +117,17 @@ jobs:
           apt-get update
           apt-get install -y --no-install-recommends \
             build-essential cmake git ca-certificates curl zip
+          # GitHub runners have no NVIDIA driver, so libcuda.so.1 (the runtime
+          # driver lib) is absent. NVIDIA's CUDA devel image ships a stub at
+          # /usr/local/cuda/lib64/stubs/libcuda.so for build-time linking, but
+          # the file is unversioned while libggml-cuda.so declares a SONAME of
+          # libcuda.so.1 — so ld -rpath-link can't satisfy the NEEDED entry by
+          # filename. Symlink the versioned name to the stub so the executables
+          # can link cleanly. We don't ship the tools (only the .so libraries),
+          # so a stub link is sufficient — they wouldn't run on the build host
+          # without a real driver but they don't need to.
+          ln -sf /usr/local/cuda/lib64/stubs/libcuda.so \
+                 /usr/local/cuda/lib64/stubs/libcuda.so.1
 
       - name: Checkout LlamaFarm (for version file)
         uses: actions/checkout@v6
