@@ -3,75 +3,130 @@ Tests for empty chunk filtering in the ingest pipeline.
 Verifies fix for issue #686 - PDF ingestion fails with
 "Cannot embed empty text" error.
 """
-
 from unittest.mock import MagicMock, patch
 
 import pytest
 
+from core.ingest_handler import IngestHandler
+
+
+def _make_doc(content):
+    doc = MagicMock()
+    doc.content = content
+    doc.metadata = {"parser": "test"}
+    return doc
+
+
+def _make_handler():
+    with patch("core.ingest_handler.load_config"), \
+         patch("core.ingest_handler.SchemaHandler"), \
+         patch("core.ingest_handler.BlobProcessor"), \
+         patch("core.ingest_handler.EventLogger"):
+        handler = IngestHandler.__new__(IngestHandler)
+        handler.namespace = "test"
+        handler.project = "test"
+        handler.database = "test"
+        handler.dataset_name = None
+        handler.data_processing_strategy = "test"
+        handler.blob_processor = MagicMock()
+        handler.embedder = MagicMock()
+        handler.vector_store = MagicMock()
+        handler.config = MagicMock()
+        return handler
+
 
 class TestEmptyChunkFiltering:
-    """Tests for empty/whitespace chunk filtering before embedding."""
-
-    def _make_doc(self, content):
-        doc = MagicMock()
-        doc.content = content
-        doc.metadata = {}
-        return doc
+    """Tests that ingest_file filters empty chunks before embedding."""
 
     def test_empty_chunks_are_filtered(self):
-        """Empty string chunks should be removed before embedding."""
-        documents = [
-            self._make_doc("valid chunk"),
-            self._make_doc(""),
-            self._make_doc("another valid chunk"),
+        """Embedder should only receive non-empty chunks."""
+        handler = _make_handler()
+        handler.blob_processor.process_blob.return_value = [
+            _make_doc("valid chunk"),
+            _make_doc(""),
+            _make_doc("another valid chunk"),
         ]
-        filtered = [
-            doc for doc in documents if doc.content and doc.content.strip()]
-        assert len(filtered) == 2
+        handler.embedder.get_embedding_dimension.return_value = 3
+        handler.embedder.validate_config.return_value = True
+        handler.embedder.embed.return_value = [[0.1, 0.2, 0.3]]
+        handler.vector_store.add_documents.return_value = ["id1"]
+
+        with patch("core.ingest_handler.EventLogger"), \
+             patch("core.ingest_handler.is_valid_embedding", return_value=(True, None)):
+            result = handler.ingest_file(b"fake pdf", {"filename": "test.pdf"})
+
+        assert handler.embedder.embed.call_count == 2
 
     def test_whitespace_only_chunks_are_filtered(self):
-        """Whitespace-only chunks should be removed before embedding."""
-        documents = [
-            self._make_doc("valid chunk"),
-            self._make_doc("   "),
-            self._make_doc("\n\t"),
+        """Whitespace-only chunks should never reach the embedder."""
+        handler = _make_handler()
+        handler.blob_processor.process_blob.return_value = [
+            _make_doc("valid chunk"),
+            _make_doc("   "),
+            _make_doc("\n\t"),
         ]
-        filtered = [
-            doc for doc in documents if doc.content and doc.content.strip()]
-        assert len(filtered) == 1
+        handler.embedder.get_embedding_dimension.return_value = 3
+        handler.embedder.validate_config.return_value = True
+        handler.embedder.embed.return_value = [[0.1, 0.2, 0.3]]
+        handler.vector_store.add_documents.return_value = ["id1"]
+
+        with patch("core.ingest_handler.EventLogger"), \
+             patch("core.ingest_handler.is_valid_embedding", return_value=(True, None)):
+            result = handler.ingest_file(b"fake pdf", {"filename": "test.pdf"})
+
+        assert handler.embedder.embed.call_count == 1
 
     def test_all_valid_chunks_pass_through(self):
-        """Valid chunks should not be filtered."""
-        documents = [
-            self._make_doc("chunk one"),
-            self._make_doc("chunk two"),
-            self._make_doc("chunk three"),
+        """Valid chunks should all reach the embedder."""
+        handler = _make_handler()
+        handler.blob_processor.process_blob.return_value = [
+            _make_doc("chunk one"),
+            _make_doc("chunk two"),
+            _make_doc("chunk three"),
         ]
-        filtered = [
-            doc for doc in documents if doc.content and doc.content.strip()]
-        assert len(filtered) == 3
+        handler.embedder.get_embedding_dimension.return_value = 3
+        handler.embedder.validate_config.return_value = True
+        handler.embedder.embed.return_value = [[0.1, 0.2, 0.3]]
+        handler.vector_store.add_documents.return_value = ["id1"]
 
-    def test_all_empty_chunks_returns_zero(self):
-        """If all chunks are empty, result should be empty list."""
-        documents = [
-            self._make_doc(""),
-            self._make_doc("   "),
-            self._make_doc("\n"),
-        ]
-        filtered = [
-            doc for doc in documents if doc.content and doc.content.strip()]
-        assert len(filtered) == 0
+        with patch("core.ingest_handler.EventLogger"), \
+             patch("core.ingest_handler.is_valid_embedding", return_value=(True, None)):
+            result = handler.ingest_file(b"fake pdf", {"filename": "test.pdf"})
 
-    def test_filtered_count_is_correct(self):
-        """Filtered count should accurately reflect removed chunks."""
-        documents = [
-            self._make_doc("valid"),
-            self._make_doc(""),
-            self._make_doc("  "),
-            self._make_doc("also valid"),
+        assert handler.embedder.embed.call_count == 3
+
+    def test_all_empty_chunks_returns_error(self):
+        """If all chunks are empty, ingest_file should return an error."""
+        handler = _make_handler()
+        handler.blob_processor.process_blob.return_value = [
+            _make_doc(""),
+            _make_doc("   "),
+            _make_doc("\n"),
         ]
-        original_count = len(documents)
-        filtered = [
-            doc for doc in documents if doc.content and doc.content.strip()]
-        filtered_count = original_count - len(filtered)
-        assert filtered_count == 2
+
+        with patch("core.ingest_handler.EventLogger"):
+            result = handler.ingest_file(b"fake pdf", {"filename": "test.pdf"})
+
+        assert result["status"] == "error"
+        assert result["reason"] == "all_chunks_empty"
+        handler.embedder.embed.assert_not_called()
+
+    def test_filtered_count_logged_correctly(self):
+        """When some chunks are filtered, result should reflect only valid chunks."""
+        handler = _make_handler()
+        handler.blob_processor.process_blob.return_value = [
+            _make_doc("valid"),
+            _make_doc(""),
+            _make_doc("  "),
+            _make_doc("also valid"),
+        ]
+        handler.embedder.get_embedding_dimension.return_value = 3
+        handler.embedder.validate_config.return_value = True
+        handler.embedder.embed.return_value = [[0.1, 0.2, 0.3]]
+        handler.vector_store.add_documents.return_value = ["id1"]
+
+        with patch("core.ingest_handler.EventLogger"), \
+             patch("core.ingest_handler.is_valid_embedding", return_value=(True, None)):
+            result = handler.ingest_file(b"fake pdf", {"filename": "test.pdf"})
+
+        assert handler.embedder.embed.call_count == 2
