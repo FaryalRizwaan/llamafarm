@@ -135,7 +135,8 @@ class IngestHandler:
                 merged.update(wildcard_override)
             if override_cfg:
                 merged.update(override_cfg)
-            self._validate_chunk_settings(merged, getattr(parser, "type", None))
+            self._validate_chunk_settings(
+                merged, getattr(parser, "type", None))
             parser.config = merged
 
         return parsers
@@ -207,7 +208,8 @@ class IngestHandler:
 
         # Dynamically import the embedder based on type from config
         # Convert type like "OllamaEmbedder" to module path
-        embedder_name_lower = embedder_type.replace("Embedder", "_embedder").lower()
+        embedder_name_lower = embedder_type.replace(
+            "Embedder", "_embedder").lower()
         module_path = f"components.embedders.{embedder_name_lower}"
 
         try:
@@ -222,7 +224,8 @@ class IngestHandler:
             logger.error(
                 f"Failed to load embedder {embedder_type} from {module_path}: {e}"
             )
-            raise ValueError(f"Cannot initialize embedder {embedder_type}: {e}") from e
+            raise ValueError(
+                f"Cannot initialize embedder {embedder_type}: {e}") from e
 
     def _initialize_vector_store(self, project_dir: Path, database: Database):
         """
@@ -323,7 +326,8 @@ class IngestHandler:
         try:
             # Process the blob with the blob processor
             try:
-                documents = self.blob_processor.process_blob(file_data, metadata)
+                documents = self.blob_processor.process_blob(
+                    file_data, metadata)
             except UnsupportedFileTypeError as e:
                 # No appropriate parser configured for this file type
                 error_msg = str(e)
@@ -380,13 +384,35 @@ class IngestHandler:
                 }
 
             if not documents:
-                event_logger.fail_event(f"No documents extracted from {filename}")
+                event_logger.fail_event(
+                    f"No documents extracted from {filename}")
                 return {
                     "status": "error",
                     "message": f"No documents extracted from {filename}",
                     "filename": filename,
                     "document_count": 0,
                 }
+
+            original_chunk_count = len(documents)
+            documents = [doc for doc in documents if doc.content.strip()]
+            filtered_count = original_chunk_count - len(documents)
+
+            if filtered_count == original_chunk_count:
+                error_msg = f"All {original_chunk_count} chunks were empty or whitespace-only for {filename}"
+                logger.error(error_msg)
+                event_logger.fail_event(error_msg)
+                return {
+                    "status": "error",
+                    "reason": "all_chunks_empty",
+                    "message": error_msg,
+                    "filename": filename,
+                    "document_count": 0,
+                }
+
+            if filtered_count > 0:
+                logger.warning(
+                    f"Filtered out {filtered_count}/{original_chunk_count} empty or whitespace-only chunks from {filename}"
+                )
 
             # Log file parsed
             # Extract parser names
@@ -475,7 +501,8 @@ class IngestHandler:
                                 logger.info(
                                     f"\n🧠 Embedding with {self.embedder.__class__.__name__}:"
                                 )
-                                logger.info(f"   └─ Dimensions: {len(doc.embeddings)}")
+                                logger.info(
+                                    f"   └─ Dimensions: {len(doc.embeddings)}")
                             embedded_documents.append(doc)
                         else:
                             # Invalid embedding (zero vector or wrong dimension)
@@ -591,7 +618,8 @@ class IngestHandler:
                         )
                 elif result is False:
                     # Database error occurred
-                    logger.error("Database error occurred during document storage")
+                    logger.error(
+                        "Database error occurred during document storage")
                     raise Exception(
                         "Failed to add documents to vector store - database error"
                     )
@@ -606,7 +634,8 @@ class IngestHandler:
 
             except Exception as e:
                 # If batch add fails, try individual adds for better error handling
-                logger.warning(f"Batch add failed: {e}, trying individual adds")
+                logger.warning(
+                    f"Batch add failed: {e}, trying individual adds")
 
                 for doc in embedded_documents:
                     try:
@@ -621,17 +650,20 @@ class IngestHandler:
                         elif isinstance(result, list) and len(result) == 0:
                             # Empty list means duplicate
                             skipped_count += 1
-                            logger.info(f"Document {doc.id} is duplicate - skipped")
+                            logger.info(
+                                f"Document {doc.id} is duplicate - skipped")
                             logger.info(
                                 f"[DUPLICATE] Document {doc.id} already in database - skipped"
                             )
                         elif result is False:
                             # Database error
-                            logger.error(f"Database error storing document {doc.id}")
+                            logger.error(
+                                f"Database error storing document {doc.id}")
                             logger.error(
                                 f"[ERROR] Database error storing document {doc.id}"
                             )
-                            raise Exception(f"Database error storing document {doc.id}")
+                            raise Exception(
+                                f"Database error storing document {doc.id}")
                         else:
                             # Unexpected return
                             logger.error(
@@ -641,7 +673,8 @@ class IngestHandler:
                                 f"Unexpected return storing document {doc.id}: {type(result)}"
                             )
                     except Exception as doc_e:
-                        logger.error(f"Failed to store document {doc.id}: {doc_e}")
+                        logger.error(
+                            f"Failed to store document {doc.id}: {doc_e}")
                         logger.error(
                             f"[ERROR] Failed to store document {doc.id}: {doc_e}"
                         )
@@ -669,7 +702,8 @@ class IngestHandler:
             if stored_count > 0:
                 logger.info(f"   ✅ Stored: {stored_count} new chunks")
             if skipped_count > 0:
-                logger.info(f"   ⏭️  Skipped: {skipped_count} duplicate chunks")
+                logger.info(
+                    f"   ⏭️  Skipped: {skipped_count} duplicate chunks")
 
             # Summary
             summary_lines = [
@@ -856,7 +890,8 @@ class IngestHandler:
                 logger.error(f"Error processing file {file_path}: {e}")
                 results["failed"] += 1
                 results["file_results"].append(
-                    {"status": "error", "filename": file_path.name, "message": str(e)}
+                    {"status": "error", "filename": file_path.name,
+                        "message": str(e)}
                 )
 
         return results
