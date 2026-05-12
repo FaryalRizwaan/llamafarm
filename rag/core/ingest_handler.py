@@ -438,6 +438,7 @@ class IngestHandler:
                 "chunks_created",
                 {
                     "chunk_count": len(documents),
+                    "filtered_chunk_count": filtered_count,
                     "avg_chunk_size": int(avg_chunk_size),
                     "file_hash": file_hash[:16],
                 },

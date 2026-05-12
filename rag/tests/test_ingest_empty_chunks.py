@@ -5,41 +5,33 @@ Verifies fix for issue #686 - PDF ingestion fails with
 """
 from unittest.mock import MagicMock, patch
 
-import pytest
-
+from core.base import Document
 from core.ingest_handler import IngestHandler
 
 
 def _make_doc(content):
-    doc = MagicMock()
-    doc.content = content
-    doc.metadata = {"parser": "test"}
-    return doc
+    return Document(content=content, metadata={"parser": "test"})
 
 
 def _make_handler():
-    with patch("core.ingest_handler.load_config"), \
-         patch("core.ingest_handler.SchemaHandler"), \
-         patch("core.ingest_handler.BlobProcessor"), \
-         patch("core.ingest_handler.EventLogger"):
-        handler = IngestHandler.__new__(IngestHandler)
-        handler.namespace = "test"
-        handler.project = "test"
-        handler.database = "test"
-        handler.dataset_name = None
-        handler.data_processing_strategy = "test"
-        handler.blob_processor = MagicMock()
-        handler.embedder = MagicMock()
-        handler.vector_store = MagicMock()
-        handler.config = MagicMock()
-        return handler
+    handler = IngestHandler.__new__(IngestHandler)
+    handler.namespace = "test"
+    handler.project = "test"
+    handler.database = "test"
+    handler.dataset_name = None
+    handler.data_processing_strategy = "test"
+    handler.blob_processor = MagicMock()
+    handler.embedder = MagicMock()
+    handler.vector_store = MagicMock()
+    handler.config = MagicMock()
+    return handler
 
 
 class TestEmptyChunkFiltering:
     """Tests that ingest_file filters empty chunks before embedding."""
 
     def test_empty_chunks_are_filtered(self):
-        """Embedder should only receive non-empty chunks."""
+        """Empty string chunks should never reach the embedder."""
         handler = _make_handler()
         handler.blob_processor.process_blob.return_value = [
             _make_doc("valid chunk"),
@@ -53,9 +45,10 @@ class TestEmptyChunkFiltering:
 
         with patch("core.ingest_handler.EventLogger"), \
              patch("core.ingest_handler.is_valid_embedding", return_value=(True, None)):
-            result = handler.ingest_file(b"fake pdf", {"filename": "test.pdf"})
+            handler.ingest_file(b"fake pdf", {"filename": "test.pdf"})
 
-        assert handler.embedder.embed.call_count == 2
+        embedded_args = [call.args[0] for call in handler.embedder.embed.call_args_list]
+        assert len(embedded_args) == 2
 
     def test_whitespace_only_chunks_are_filtered(self):
         """Whitespace-only chunks should never reach the embedder."""
@@ -72,9 +65,10 @@ class TestEmptyChunkFiltering:
 
         with patch("core.ingest_handler.EventLogger"), \
              patch("core.ingest_handler.is_valid_embedding", return_value=(True, None)):
-            result = handler.ingest_file(b"fake pdf", {"filename": "test.pdf"})
+            handler.ingest_file(b"fake pdf", {"filename": "test.pdf"})
 
-        assert handler.embedder.embed.call_count == 1
+        embedded_args = [call.args[0] for call in handler.embedder.embed.call_args_list]
+        assert len(embedded_args) == 1
 
     def test_all_valid_chunks_pass_through(self):
         """Valid chunks should all reach the embedder."""
@@ -91,12 +85,13 @@ class TestEmptyChunkFiltering:
 
         with patch("core.ingest_handler.EventLogger"), \
              patch("core.ingest_handler.is_valid_embedding", return_value=(True, None)):
-            result = handler.ingest_file(b"fake pdf", {"filename": "test.pdf"})
+            handler.ingest_file(b"fake pdf", {"filename": "test.pdf"})
 
-        assert handler.embedder.embed.call_count == 3
+        embedded_args = [call.args[0] for call in handler.embedder.embed.call_args_list]
+        assert len(embedded_args) == 3
 
     def test_all_empty_chunks_returns_error(self):
-        """If all chunks are empty, ingest_file should return an error."""
+        """If all chunks are empty, ingest_file should return error and never call embedder."""
         handler = _make_handler()
         handler.blob_processor.process_blob.return_value = [
             _make_doc(""),
@@ -111,8 +106,8 @@ class TestEmptyChunkFiltering:
         assert result["reason"] == "all_chunks_empty"
         handler.embedder.embed.assert_not_called()
 
-    def test_filtered_count_logged_correctly(self):
-        """When some chunks are filtered, result should reflect only valid chunks."""
+    def test_mixed_valid_and_empty_chunks(self):
+        """Embedder should only receive the valid chunks from a mixed input."""
         handler = _make_handler()
         handler.blob_processor.process_blob.return_value = [
             _make_doc("valid"),
@@ -127,6 +122,7 @@ class TestEmptyChunkFiltering:
 
         with patch("core.ingest_handler.EventLogger"), \
              patch("core.ingest_handler.is_valid_embedding", return_value=(True, None)):
-            result = handler.ingest_file(b"fake pdf", {"filename": "test.pdf"})
+            handler.ingest_file(b"fake pdf", {"filename": "test.pdf"})
 
-        assert handler.embedder.embed.call_count == 2
+        embedded_args = [call.args[0] for call in handler.embedder.embed.call_args_list]
+        assert len(embedded_args) == 2
