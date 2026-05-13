@@ -388,6 +388,27 @@ class IngestHandler:
                     "document_count": 0,
                 }
 
+            original_chunk_count = len(documents)
+            documents = [doc for doc in documents if doc.content.strip()]
+            filtered_count = original_chunk_count - len(documents)
+
+            if filtered_count == original_chunk_count:
+                error_msg = f"All {original_chunk_count} chunks were empty or whitespace-only for {filename}"
+                logger.error(error_msg)
+                event_logger.fail_event(error_msg)
+                return {
+                    "status": "error",
+                    "reason": "all_chunks_empty",
+                    "message": error_msg,
+                    "filename": filename,
+                    "document_count": 0,
+                }
+
+            if filtered_count > 0:
+                logger.warning(
+                    f"Filtered out {filtered_count}/{original_chunk_count} empty or whitespace-only chunks from {filename}"
+                )
+
             # Log file parsed
             # Extract parser names
             parser_names = list(
@@ -417,6 +438,7 @@ class IngestHandler:
                 "chunks_created",
                 {
                     "chunk_count": len(documents),
+                    "filtered_chunk_count": filtered_count,
                     "avg_chunk_size": int(avg_chunk_size),
                     "file_hash": file_hash[:16],
                 },
