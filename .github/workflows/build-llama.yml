@@ -110,7 +110,7 @@ jobs:
           - backend: cuda12
             image: nvidia/cuda:12.6.3-devel-ubuntu22.04
           - backend: cuda13
-            image: nvidia/cuda:13.0-devel-ubuntu22.04
+            image: nvidia/cuda:13.0.2-devel-ubuntu22.04
     steps:
       - name: Install dependencies
         run: |
