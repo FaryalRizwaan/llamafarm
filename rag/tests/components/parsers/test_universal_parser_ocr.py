@@ -89,9 +89,7 @@ class TestUniversalParserOCREndpoint:
         # Setup mock response
         mock_response = MagicMock()
         mock_response.ok = True
-        mock_response.json.return_value = {
-            "text": "Extracted text from OCR"
-        }
+        mock_response.json.return_value = {"text": "Extracted text from OCR"}
         mock_post.return_value = mock_response
 
         # Create a temp file to test with
@@ -295,7 +293,10 @@ class TestUniversalParserOCRIntegration:
 
         # Create a text file with more content
         with tempfile.NamedTemporaryFile(mode="w", suffix=".txt", delete=False) as f:
-            content = "This is a text file with significantly more content than OCR would extract. " * 5
+            content = (
+                "This is a text file with significantly more content than OCR would extract. "
+                * 5
+            )
             f.write(content)
             temp_path = f.name
 
