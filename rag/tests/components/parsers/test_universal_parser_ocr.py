@@ -114,7 +114,12 @@ class TestUniversalParserOCREndpoint:
             assert "filename" in request_json
 
             # Verify result
-            assert result == "Extracted text from OCR"
+            assert result == {
+                "text": "Extracted text from OCR",
+                "ocr_model": None,
+                "ocr_languages": None,
+                "ocr_confidence": None,
+            }
 
         finally:
             Path(temp_path).unlink(missing_ok=True)

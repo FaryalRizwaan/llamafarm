@@ -23,7 +23,8 @@ from core.logging import RAGStructLogger
 logger = RAGStructLogger("rag.components.parsers.universal")
 
 # Chunking strategy type
-ChunkStrategy = Literal["semantic", "sections", "paragraphs", "sentences", "characters"]
+ChunkStrategy = Literal["semantic", "sections",
+                        "paragraphs", "sentences", "characters"]
 
 # Try to import optional dependencies
 try:
@@ -160,7 +161,8 @@ class UniversalParser(BaseParser):
                 "text/markdown",
             ],
             capabilities=["text_extraction", "chunking"],
-            dependencies={"required": ["markitdown"], "optional": ["semchunk"]},
+            dependencies={"required": ["markitdown"],
+                          "optional": ["semchunk"]},
             default_config={"chunk_size": 1024, "chunk_strategy": "semantic"},
         )
 
@@ -215,7 +217,7 @@ class UniversalParser(BaseParser):
                     doc_metadata["ocr_model"] = ocr_result["ocr_model"]
                 if ocr_result.get("ocr_languages"):
                     doc_metadata["ocr_languages"] = ocr_result["ocr_languages"]
-                if ocr_result.get("ocr_confidence"):
+                if ocr_result.get("ocr_confidence") is not None:
                     doc_metadata["ocr_confidence"] = ocr_result["ocr_confidence"]
                 self.logger.info("OCR applied", file_path=str(file_path))
 
@@ -305,12 +307,14 @@ class UniversalParser(BaseParser):
                 with open(file_path, encoding=encoding, errors="ignore") as f:
                     return f.read(), metadata
             except Exception as e:
-                self.logger.error(f"Failed to read file: {e}", file_path=str(file_path))
+                self.logger.error(
+                    f"Failed to read file: {e}", file_path=str(file_path))
                 return "", metadata
 
         try:
             result = self._markitdown.convert(str(file_path))
-            text = result.text_content if hasattr(result, "text_content") else ""
+            text = result.text_content if hasattr(
+                result, "text_content") else ""
 
             # Extract any metadata from MarkItDown result
             if (
@@ -382,7 +386,8 @@ class UniversalParser(BaseParser):
             # Average ~4 chars per token for English
             token_chunk_size = max(self.chunk_size // 4, 100)
 
-            chunker = semchunk.chunkerify(self._encoder, chunk_size=token_chunk_size)
+            chunker = semchunk.chunkerify(
+                self._encoder, chunk_size=token_chunk_size)
             chunks = chunker(text)
 
             # Filter out empty chunks and ensure minimum size
@@ -610,7 +615,8 @@ class UniversalParser(BaseParser):
             True if OCR should be attempted
         """
         # Always try OCR for image files
-        image_extensions = {".png", ".jpg", ".jpeg", ".gif", ".bmp", ".tiff", ".webp"}
+        image_extensions = {".png", ".jpg", ".jpeg",
+                            ".gif", ".bmp", ".tiff", ".webp"}
         if file_path.suffix.lower() in image_extensions:
             return True
 
