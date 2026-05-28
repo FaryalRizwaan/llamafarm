@@ -628,41 +628,33 @@ class UniversalParser(BaseParser):
             Dict with OCR results or None if failed
         """
         try:
-            import base64
-
             import requests
 
-            # Read file and encode as base64
-            with open(file_path, "rb") as f:
-                file_data = base64.b64encode(f.read()).decode("utf-8")
+            with open(file_path, "rb") as fh:
+                files = {"file": (Path(file_path).name, fh)}
+                data = {}
+                if self.ocr_model:
+                    data["model"] = self.ocr_model
+                if self.ocr_languages:
+                    data["languages"] = ",".join(self.ocr_languages)
+                if self.return_boxes:
+                    data["return_boxes"] = "true"
 
-            # Build request payload
-            payload = {
-                "image": file_data,
-                "filename": Path(file_path).name,
-            }
-
-            # Conditionally add optional parameters
-            if self.ocr_model:
-                payload["model"] = self.ocr_model
-            if self.ocr_languages:
-                payload["languages"] = self.ocr_languages
-            if self.return_boxes:
-                payload["return_boxes"] = self.return_boxes
-
-            response = requests.post(
-                self.ocr_endpoint,
-                json=payload,
-                timeout=60,
-            )
+                response = requests.post(
+                    self.ocr_endpoint,
+                    files=files,
+                    data=data,
+                    timeout=60,
+                )
 
             if response.ok:
-                result = response.json()
+                payload = response.json()
+                item = (payload.get("data") or [{}])[0]
                 return {
-                    "text": result.get("text", ""),
-                    "ocr_model": result.get("model"),
-                    "ocr_languages": result.get("languages"),
-                    "ocr_confidence": result.get("confidence"),
+                    "text": item.get("text", ""),
+                    "ocr_model": payload.get("model"),
+                    "ocr_languages": self.ocr_languages,
+                    "ocr_confidence": item.get("confidence"),
                 }
 
         except Exception as e:

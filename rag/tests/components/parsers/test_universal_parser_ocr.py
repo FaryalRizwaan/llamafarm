@@ -89,7 +89,10 @@ class TestUniversalParserOCREndpoint:
         # Setup mock response
         mock_response = MagicMock()
         mock_response.ok = True
-        mock_response.json.return_value = {"text": "Extracted text from OCR"}
+        mock_response.json.return_value = {
+            "data": [{"text": "Extracted text from OCR", "confidence": 0.95}],
+            "model": "test-model",
+        }
         mock_post.return_value = mock_response
 
         # Create a temp file to test with
@@ -108,17 +111,13 @@ class TestUniversalParserOCREndpoint:
             # Verify the endpoint URL
             assert call_args[0][0] == "http://127.0.0.1:14345/v1/vision/ocr"
 
-            # Verify the request contains base64 image
-            request_json = call_args[1]["json"]
-            assert "image" in request_json
-            assert "filename" in request_json
-
-            # Verify result
+            assert "files" in call_args[1]
+            assert "json" not in call_args[1]
             assert result == {
                 "text": "Extracted text from OCR",
-                "ocr_model": None,
+                "ocr_model": "test-model",
                 "ocr_languages": None,
-                "ocr_confidence": None,
+                "ocr_confidence": 0.95,
             }
 
         finally:
@@ -197,6 +196,47 @@ class TestUniversalParserOCREndpoint:
         finally:
             Path(temp_path).unlink(missing_ok=True)
 
+    @patch("requests.post")
+    def test_sends_multipart_with_ocr_params(self, mock_post):
+        """Test: OCR request is sent as multipart with model/languages/return_boxes."""
+        from components.parsers.universal import UniversalParser
+
+        mock_response = MagicMock()
+        mock_response.ok = True
+        mock_response.json.return_value = {
+            "data": [{"text": "OCR result", "confidence": 0.9}],
+            "model": "mistral-ocr-latest",
+        }
+        mock_post.return_value = mock_response
+
+        with tempfile.NamedTemporaryFile(mode="wb", suffix=".png", delete=False) as f:
+            f.write(b"fake image data")
+            temp_path = f.name
+
+        try:
+            parser = UniversalParser(
+                config={
+                    "use_ocr": True,
+                    "ocr_model": "mistral-ocr-latest",
+                    "ocr_languages": ["en", "fr"],
+                    "return_boxes": True,
+                }
+            )
+            result = parser._run_remote_ocr(temp_path)
+
+            call_args = mock_post.call_args
+            assert "files" in call_args[1]
+            assert "json" not in call_args[1]
+            sent_data = call_args[1]["data"]
+            assert sent_data["model"] == "mistral-ocr-latest"
+            assert sent_data["languages"] == "en,fr"
+            assert sent_data["return_boxes"] == "true"
+            assert result["text"] == "OCR result"
+            assert result["ocr_confidence"] == 0.9
+
+        finally:
+            Path(temp_path).unlink(missing_ok=True)
+
 
 class TestUniversalParserOCRIntegration:
     """Test OCR integration with parse flow."""
@@ -210,7 +250,13 @@ class TestUniversalParserOCRIntegration:
         mock_response = MagicMock()
         mock_response.ok = True
         mock_response.json.return_value = {
-            "text": "This text was extracted via OCR from the image. " * 20
+            "data": [
+                {
+                    "text": "This text was extracted via OCR from the image. " * 20,
+                    "confidence": 0.9,
+                }
+            ],
+            "model": None,
         }
         mock_post.return_value = mock_response
 
@@ -242,7 +288,10 @@ class TestUniversalParserOCRIntegration:
         mock_response = MagicMock()
         mock_response.ok = True
         ocr_text = "This is OCR extracted text. " * 50  # Long enough to create chunks
-        mock_response.json.return_value = {"text": ocr_text}
+        mock_response.json.return_value = {
+            "data": [{"text": ocr_text, "confidence": 0.9}],
+            "model": None,
+        }
         mock_post.return_value = mock_response
 
         # Create a fake image file
@@ -344,7 +393,10 @@ class TestUniversalParserOCREndpointConfig:
 
         mock_response = MagicMock()
         mock_response.ok = True
-        mock_response.json.return_value = {"text": "OCR result"}
+        mock_response.json.return_value = {
+            "data": [{"text": "OCR result", "confidence": 0.9}],
+            "model": None,
+        }
         mock_post.return_value = mock_response
 
         custom_endpoint = "http://my-ocr-server:9000/ocr"
